@@ -535,6 +535,339 @@ function TabTraining() {
         loading={backtestLoading}
       />
 
+      {/* Deploy to Live Trading Section */}
+      {backtestResults && backtestResults.sharpe_ratio > 0 && (
+        <div style={{
+          marginTop: '20px',
+          padding: '24px',
+          background: '#0d1117',
+          border: '2px solid #30363d',
+          borderRadius: '8px'
+        }}>
+          <h3 style={{
+            color: '#58a6ff',
+            marginTop: 0,
+            marginBottom: '16px',
+            fontSize: '18px',
+            fontWeight: 'bold'
+          }}>
+            🚀 Deploy Model to Live Trading
+          </h3>
+
+          {/* Warning/Info Messages */}
+          {backtestResults.sharpe_ratio < 1.5 && (
+            <div style={{
+              padding: '12px',
+              background: 'rgba(187, 128, 9, 0.15)',
+              border: '1px solid #bb8009',
+              borderRadius: '6px',
+              marginBottom: '16px',
+              color: '#d29922',
+              fontSize: '13px'
+            }}>
+              ⚠️ <strong>Warning:</strong> Sharpe Ratio is {backtestResults.sharpe_ratio.toFixed(2)}. 
+              Recommended minimum is 1.5 for live trading. Consider retraining or using paper trading mode.
+            </div>
+          )}
+
+          {backtestResults.sharpe_ratio >= 1.5 && (
+            <div style={{
+              padding: '12px',
+              background: 'rgba(35, 134, 54, 0.15)',
+              border: '1px solid #238636',
+              borderRadius: '6px',
+              marginBottom: '16px',
+              color: '#3fb950',
+              fontSize: '13px'
+            }}>
+              ✅ <strong>Good Performance:</strong> Sharpe Ratio is {backtestResults.sharpe_ratio.toFixed(2)}. 
+              Model meets minimum requirements for live trading.
+            </div>
+          )}
+
+          {/* Current Model Info */}
+          <div style={{
+            padding: '12px',
+            background: '#161b22',
+            borderRadius: '6px',
+            marginBottom: '16px',
+            fontSize: '13px',
+            color: '#8b949e'
+          }}>
+            <div style={{ marginBottom: '8px' }}>
+              <strong style={{ color: '#c9d1d9' }}>Current Model:</strong> {selectedAgent} - {selectedAgent === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+              <div>
+                <div style={{ color: '#6e7681', fontSize: '11px' }}>Total Return</div>
+                <div style={{ color: backtestResults.total_return >= 0 ? '#3fb950' : '#f85149', fontWeight: 'bold' }}>
+                  {backtestResults.total_return >= 0 ? '+' : ''}{backtestResults.total_return?.toFixed(2)}%
+                </div>
+              </div>
+              <div>
+                <div style={{ color: '#6e7681', fontSize: '11px' }}>Sharpe Ratio</div>
+                <div style={{ color: '#58a6ff', fontWeight: 'bold' }}>
+                  {backtestResults.sharpe_ratio?.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div style={{ color: '#6e7681', fontSize: '11px' }}>Max Drawdown</div>
+                <div style={{ color: '#f85149', fontWeight: 'bold' }}>
+                  {backtestResults.max_drawdown?.toFixed(2)}%
+                </div>
+              </div>
+              <div>
+                <div style={{ color: '#6e7681', fontSize: '11px' }}>Win Rate</div>
+                <div style={{ color: '#3fb950', fontWeight: 'bold' }}>
+                  {backtestResults.win_rate?.toFixed(1)}%
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Deployment Configuration */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr 1fr',
+            gap: '16px',
+            marginBottom: '16px'
+          }}>
+            {/* Time Frame Selection */}
+            <div>
+              <label style={{
+                display: 'block',
+                color: '#8b949e',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                marginBottom: '8px'
+              }}>
+                ⏰ Trading Time Frame
+              </label>
+              <select
+                value={selectedAgent === 'PPO' ? trainingState.ppoTimeFrame || 'daily' : trainingState.sacTimeFrame || 'daily'}
+                onChange={(e) => {
+                  if (selectedAgent === 'PPO') {
+                    trainingState.setPpoTimeFrame(e.target.value);
+                  } else {
+                    trainingState.setSacTimeFrame(e.target.value);
+                  }
+                }}
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  background: '#0d1117',
+                  border: '1px solid #30363d',
+                  borderRadius: '6px',
+                  color: '#c9d1d9',
+                  fontSize: '13px',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="daily">📅 Daily (EOD) - Recommended</option>
+                <option value="4hour">🕐 4 Hours - Swing Trading</option>
+                <option value="1hour">🕐 1 Hour - Active Trading</option>
+                <option value="15min">⏱️ 15 Minutes - Day Trading</option>
+                <option value="5min">⏱️ 5 Minutes - Scalping</option>
+                <option value="1min">⚡ 1 Minute - HFT (requires live data)</option>
+              </select>
+              <div style={{
+                marginTop: '6px',
+                fontSize: '11px',
+                color: '#6e7681',
+                fontStyle: 'italic'
+              }}>
+                {(selectedAgent === 'PPO' ? trainingState.ppoTimeFrame : trainingState.sacTimeFrame) === 'daily' && '✅ No live data needed'}
+                {['15min', '5min', '1min'].includes(selectedAgent === 'PPO' ? trainingState.ppoTimeFrame : trainingState.sacTimeFrame) && '⚠️ Requires IBKR live data subscription'}
+              </div>
+            </div>
+
+            {/* Initial Capital */}
+            <div>
+              <label style={{
+                display: 'block',
+                color: '#8b949e',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                marginBottom: '8px'
+              }}>
+                💰 Initial Capital
+              </label>
+              <input
+                type="number"
+                value={selectedAgent === 'PPO' ? trainingState.ppoInitialCapital || 10000 : trainingState.sacInitialCapital || 10000}
+                onChange={(e) => {
+                  const value = parseFloat(e.target.value) || 0;
+                  if (selectedAgent === 'PPO') {
+                    trainingState.setPpoInitialCapital(value);
+                  } else {
+                    trainingState.setSacInitialCapital(value);
+                  }
+                }}
+                min="1000"
+                step="1000"
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  background: '#0d1117',
+                  border: '1px solid #30363d',
+                  borderRadius: '6px',
+                  color: '#c9d1d9',
+                  fontSize: '13px'
+                }}
+              />
+              <div style={{
+                marginTop: '6px',
+                fontSize: '11px',
+                color: '#6e7681',
+                fontStyle: 'italic'
+              }}>
+                Paper trading mode (no real money)
+              </div>
+            </div>
+
+            {/* Max Position Size */}
+            <div>
+              <label style={{
+                display: 'block',
+                color: '#8b949e',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                marginBottom: '8px'
+              }}>
+                📊 Max Position Size
+              </label>
+              <select
+                value={selectedAgent === 'PPO' ? trainingState.ppoMaxPosition || 50 : trainingState.sacMaxPosition || 50}
+                onChange={(e) => {
+                  const value = parseInt(e.target.value);
+                  if (selectedAgent === 'PPO') {
+                    trainingState.setPpoMaxPosition(value);
+                  } else {
+                    trainingState.setSacMaxPosition(value);
+                  }
+                }}
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  background: '#0d1117',
+                  border: '1px solid #30363d',
+                  borderRadius: '6px',
+                  color: '#c9d1d9',
+                  fontSize: '13px',
+                  cursor: 'pointer'
+                }}
+              >
+                <option value="25">25% - Very Conservative</option>
+                <option value="50">50% - Balanced</option>
+                <option value="75">75% - Aggressive</option>
+                <option value="100">100% - Maximum</option>
+              </select>
+              <div style={{
+                marginTop: '6px',
+                fontSize: '11px',
+                color: '#6e7681',
+                fontStyle: 'italic'
+              }}>
+                % of capital per trade
+              </div>
+            </div>
+          </div>
+
+          {/* Deploy Buttons */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: selectedAgent === 'PPO' ? '1fr' : '1fr',
+            gap: '12px'
+          }}>
+            {selectedAgent === 'PPO' && (
+              <button
+                onClick={() => handleDeployToPPO()}
+                disabled={!backtestResults || backtestResults.sharpe_ratio < 0.5}
+                style={{
+                  padding: '14px 24px',
+                  background: backtestResults.sharpe_ratio >= 1.5 ? '#238636' : '#bb8009',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  cursor: backtestResults.sharpe_ratio < 0.5 ? 'not-allowed' : 'pointer',
+                  opacity: backtestResults.sharpe_ratio < 0.5 ? 0.5 : 1,
+                  transition: 'all 0.2s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
+                }}
+                onMouseOver={(e) => {
+                  if (backtestResults.sharpe_ratio >= 0.5) {
+                    e.target.style.transform = 'translateY(-2px)';
+                    e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
+                  }
+                }}
+                onMouseOut={(e) => {
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = 'none';
+                }}
+              >
+                <span style={{ fontSize: '18px' }}>📈</span>
+                <span>Deploy {trainingState.ppoSymbol} to PPO Live Trading (Paper Mode)</span>
+              </button>
+            )}
+
+            {selectedAgent === 'SAC' && (
+              <button
+                onClick={() => handleDeployToSAC()}
+                disabled={!backtestResults || backtestResults.sharpe_ratio < 0.5}
+                style={{
+                  padding: '14px 24px',
+                  background: backtestResults.sharpe_ratio >= 1.5 ? '#238636' : '#bb8009',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  fontSize: '14px',
+                  fontWeight: 'bold',
+                  cursor: backtestResults.sharpe_ratio < 0.5 ? 'not-allowed' : 'pointer',
+                  opacity: backtestResults.sharpe_ratio < 0.5 ? 0.5 : 1,
+                  transition: 'all 0.2s',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px'
+                }}
+                onMouseOver={(e) => {
+                  if (backtestResults.sharpe_ratio >= 0.5) {
+                    e.target.style.transform = 'translateY(-2px)';
+                    e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
+                  }
+                }}
+                onMouseOut={(e) => {
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = 'none';
+                }}
+              >
+                <span style={{ fontSize: '18px' }}>🚀</span>
+                <span>Deploy {trainingState.sacSymbol} to SAC Live Trading (Paper Mode)</span>
+              </button>
+            )}
+          </div>
+
+          {/* Info Footer */}
+          <div style={{
+            marginTop: '16px',
+            padding: '12px',
+            background: 'rgba(31, 111, 235, 0.1)',
+            border: '1px solid #1f6feb',
+            borderRadius: '6px',
+            fontSize: '12px',
+            color: '#58a6ff'
+          }}>
+            💡 <strong>Note:</strong> This will create a live trading agent in <strong>Paper Trading Mode</strong> (IBKR Paper Account). 
+            No real money will be used. You can monitor the agent in the Live Trading tab.
+          </div>
+        </div>
+      )}
+
       {/* Models Comparison Table - Compare all trained models */}
       <ModelsComparisonTable 
         agentType={selectedAgent}
