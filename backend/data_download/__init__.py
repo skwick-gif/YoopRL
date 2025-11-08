@@ -11,8 +11,9 @@ This module handles:
 
 from .loader import download_history, prepare_training_data
 from .config import DownloadConfig
-from .sentiment_features import SentimentFeatureAggregator
-from .sentiment_service import EnterpriseSentimentAnalyzer
+# Lazy import for sentiment to avoid NLTK blocking
+# from .sentiment_features import SentimentFeatureAggregator
+# from .sentiment_service import EnterpriseSentimentAnalyzer
 from .multi_asset_loader import download_histories, prepare_multi_asset_features
 from .live_data_helpers import (
     snapshot_fetch,

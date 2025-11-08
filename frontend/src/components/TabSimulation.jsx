@@ -5,6 +5,8 @@ function TabSimulation() {
   const [dataSource, setDataSource] = useState('csv');
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedModel, setSelectedModel] = useState('PPO_AAPL_v3.2');
+  const [simulationMode, setSimulationMode] = useState('backtest'); // 'backtest' or 'live'
+  const [showResults, setShowResults] = useState(false); // Toggle results panel
 
   // Available trained models (will be loaded from backend)
   const availableModels = [
@@ -17,8 +19,81 @@ function TabSimulation() {
 
   const currentModel = availableModels.find(m => m.id === selectedModel);
 
+  // Mock backtest results (will come from API)
+  const backtestResults = {
+    total_return: 34.2,
+    sharpe_ratio: 1.82,
+    sortino_ratio: 2.15,
+    max_drawdown: -12.4,
+    win_rate: 58.3,
+    calmar_ratio: 2.76,
+    profit_factor: 1.85,
+    total_trades: 142,
+    winning_trades: 83,
+    losing_trades: 59,
+    avg_win: 2.8,
+    avg_loss: -1.4,
+    largest_win: 8.5,
+    largest_loss: -4.2,
+    final_equity: 134200,
+    initial_capital: 100000
+  };
+
+  const handleRunBacktest = () => {
+    setShowResults(true);
+    // Will call API here
+  };
+
   return (
     <div>
+      {/* Simulation Mode Toggle */}
+      <Card style={{ marginBottom: '12px', padding: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ fontSize: '11px', color: '#8b949e', fontWeight: 600 }}>
+            SIMULATION MODE:
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={() => setSimulationMode('backtest')}
+              style={{
+                padding: '6px 16px',
+                fontSize: '11px',
+                fontWeight: 600,
+                borderRadius: '6px',
+                border: simulationMode === 'backtest' ? '2px solid #58a6ff' : '1px solid #30363d',
+                background: simulationMode === 'backtest' ? '#1f6feb' : '#21262d',
+                color: simulationMode === 'backtest' ? '#ffffff' : '#8b949e',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+              }}
+            >
+              📊 Backtest Mode
+            </button>
+            <button
+              onClick={() => setSimulationMode('live')}
+              style={{
+                padding: '6px 16px',
+                fontSize: '11px',
+                fontWeight: 600,
+                borderRadius: '6px',
+                border: simulationMode === 'live' ? '2px solid #3fb950' : '1px solid #30363d',
+                background: simulationMode === 'live' ? '#238636' : '#21262d',
+                color: simulationMode === 'live' ? '#ffffff' : '#8b949e',
+                cursor: 'pointer',
+                transition: 'all 0.2s'
+              }}
+            >
+              🔴 Live Mode
+            </button>
+          </div>
+          <div style={{ flex: 1 }} />
+          <div style={{ fontSize: '10px', color: '#6e7681', fontStyle: 'italic' }}>
+            {simulationMode === 'backtest' 
+              ? 'Run complete backtest with full metrics and analysis' 
+              : 'Watch agent trade step-by-step in real-time'}
+          </div>
+        </div>
+      </Card>
       {/* Model Selection - Choose which trained model to use for simulation */}
       <Card style={{ marginBottom: '12px' }}>
         <div className="control-title">Model Selection</div>

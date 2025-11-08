@@ -7,16 +7,22 @@ This module handles:
 - Splitting data into train/test sets
 """
 
+import sys
+from pathlib import Path
+
+# Add backend directory to path for absolute imports
+backend_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(backend_dir))
+
 from dataclasses import dataclass
 from typing import Tuple, Optional
-from pathlib import Path
 import pandas as pd
 import yfinance as yf
 import numpy as np
 import logging
 
-from .config import TrainingDataConfig
-from ..database.db_manager import DatabaseManager
+from data_download.config import TrainingDataConfig
+from database.db_manager import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +169,9 @@ def download_history(
                 f"Check if symbol exists and period is valid."
             )
         
+        # Clean up: Remove rows with NaT index (corrupted data)
+        df = df[df.index.notna()]
+        
         logger.info(f"Successfully downloaded {len(df)} bars for {symbol}")
         logger.info(f"Date range: {df.index[0]} to {df.index[-1]}")
         
@@ -183,9 +192,15 @@ def prepare_training_data(
     train_test_split: float = 0.8,
     cache_dir: Optional[Path] = None,
     enable_sentiment: bool = False,
+    enable_social_media: bool = False,
+    enable_news: bool = False,
+    enable_market_events: bool = False,
+    enable_fundamental: bool = False,
     enable_multi_asset: bool = False,
+    enable_macro: bool = False,
     multi_asset_symbols: Optional[list] = None,
     force_redownload: bool = False,
+    feature_config: Optional[dict] = None,  # NEW: Feature selection from UI
 ) -> Tuple[PreparedData, DataSplit]:
     """
     Complete pipeline: download → features → normalize → split
@@ -195,9 +210,15 @@ def prepare_training_data(
         period: Time period for historical data
         train_test_split: Fraction for training (0.8 = 80% train, 20% test)
         cache_dir: Directory for caching multi-asset/sentiment data
-        enable_sentiment: Include sentiment features from news/social media
+        enable_sentiment: LEGACY - Include sentiment features (use enable_social_media/enable_news instead)
+        enable_social_media: Include social media sentiment (Reddit, StockTwits, Google Trends)
+        enable_news: Include news sentiment (Alpha Vantage, Finnhub, NewsAPI)
+        enable_market_events: Include market events (earnings dates, dividends, splits) - IMPLEMENTED via yfinance
+        enable_fundamental: Include fundamental data (P/E, EPS, margins, debt/equity) - IMPLEMENTED via yfinance
         enable_multi_asset: Include cross-asset correlation features
+        enable_macro: Include macro indicators (VIX, yields, DXY, oil, gold) - IMPLEMENTED via yfinance + FRED
         multi_asset_symbols: List of symbols for cross-asset features
+        feature_config: Feature selection config from UI (includes macro, technical indicators)
                             
     Returns:
         Tuple of (PreparedData, DataSplit)
@@ -205,11 +226,26 @@ def prepare_training_data(
         - DataSplit: Contains train/test split
         
     Example:
-        >>> data, split = prepare_training_data("IWM", period="5y")
+        >>> data, split = prepare_training_data("IWM", period="5y", enable_news=True)
         >>> print(f"Train shape: {split.train.shape}")
         >>> print(f"Test shape: {split.test.shape}")
         >>> print(f"Features: {data.feature_names[:10]}")
     """
+    # Combine sentiment flags: Social Media + News both use sentiment_data table
+    enable_sentiment_combined = enable_sentiment or enable_social_media or enable_news
+    
+    # Update feature_config to include fundamentals, events, macro
+    if feature_config is None:
+        feature_config = {}
+    
+    # Add flags to feature_config for selective computation
+    if enable_fundamental:
+        feature_config['fundamental'] = {'enabled': True}
+    if enable_market_events:
+        feature_config['market_events'] = {'enabled': True}
+    if enable_macro:
+        feature_config['macro'] = {'enabled': True}
+    
     # Step 1: Download raw data from Yahoo Finance (with smart caching)
     logger.info(f"Step 1/4: Downloading {symbol} data...")
     raw_df = download_history(
@@ -224,7 +260,7 @@ def prepare_training_data(
     
     # For now, we'll use basic technical indicators
     # We'll implement full FeatureEngineering in the next file
-    from .feature_engineering import FeatureEngineering
+    from data_download.feature_engineering import FeatureEngineering
     
     if cache_dir is None:
         cache_dir = Path("d:/YoopRL/data/cache")
@@ -233,8 +269,9 @@ def prepare_training_data(
         symbol=symbol,
         enable_multi_asset=enable_multi_asset,
         multi_asset_symbols=multi_asset_symbols or ["SPY", "QQQ", "TLT", "GLD"],
-        enable_sentiment=enable_sentiment,
+        enable_sentiment=enable_sentiment_combined,  # ← Use combined flag
         cache_root=cache_dir,
+        feature_config=feature_config,  # ← NEW: Pass feature selection from UI
     )
     
     # Process: Add technical indicators

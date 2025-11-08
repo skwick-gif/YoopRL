@@ -1,0 +1,23 @@
+{
+  "symbol": "MBLY",
+  "timestamp": "20251108_124156",
+  "date_range": "2022-10-26 00:00:00 to 2025-11-07 00:00:00",
+  "total_rows": 762,
+  "train_rows": 570,
+  "test_rows": 143,
+  "feature_count": 12,
+  "features": [
+    "returns",
+    "log_returns",
+    "sma_20",
+    "sma_50",
+    "ema_12",
+    "ema_26",
+    "volatility_20",
+    "atr",
+    "volume_sma_20",
+    "volume_ratio",
+    "high_low_ratio",
+    "close_open_ratio"
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "symbol": "INTC",
+  "timestamp": "20251108_115331",
+  "date_range": "2025-08-08 00:00:00 to NaT",
+  "total_rows": 66,
+  "train_rows": 13,
+  "test_rows": 4,
+  "feature_count": 12,
+  "features": [
+    "returns",
+    "log_returns",
+    "sma_20",
+    "sma_50",
+    "ema_12",
+    "ema_26",
+    "volatility_20",
+    "atr",
+    "volume_sma_20",
+    "volume_ratio",
+    "high_low_ratio",
+    "close_open_ratio"
+  ]
+}

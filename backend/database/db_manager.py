@@ -291,6 +291,147 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE sentiment_data ADD COLUMN pro_newsapi_articles INTEGER")
                 logger.info("✓ Professional sentiment columns added successfully")
             
+            # Fundamental Data Table
+            # Company fundamental metrics from yfinance
+            # Used for: Value investing signals, quality scoring, financial health
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fundamental_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,                  -- Stock symbol
+                    date TEXT NOT NULL,                    -- Date of snapshot (YYYY-MM-DD)
+                    
+                    -- Valuation Metrics
+                    forward_pe REAL,                       -- Forward P/E ratio
+                    price_to_book REAL,                    -- Price to Book ratio
+                    market_cap REAL,                       -- Market capitalization
+                    enterprise_value REAL,                 -- Enterprise value
+                    
+                    -- Profitability Metrics
+                    profit_margins REAL,                   -- Profit margin (%)
+                    operating_margins REAL,                -- Operating margin (%)
+                    gross_margins REAL,                    -- Gross margin (%)
+                    return_on_equity REAL,                 -- ROE (%)
+                    return_on_assets REAL,                 -- ROA (%)
+                    
+                    -- Growth Metrics
+                    revenue_growth REAL,                   -- Revenue growth YoY (%)
+                    total_revenue REAL,                    -- Total revenue
+                    
+                    -- Financial Health
+                    debt_to_equity REAL,                   -- Debt to Equity ratio
+                    current_ratio REAL,                    -- Current ratio
+                    quick_ratio REAL,                      -- Quick ratio (acid test)
+                    
+                    -- Cash Flow
+                    free_cashflow REAL,                    -- Free cash flow
+                    operating_cashflow REAL,               -- Operating cash flow
+                    
+                    -- Per Share Metrics
+                    trailing_eps REAL,                     -- Trailing EPS
+                    forward_eps REAL,                      -- Forward EPS
+                    book_value REAL,                       -- Book value per share
+                    
+                    -- Risk Metrics
+                    beta REAL,                             -- Beta (volatility vs market)
+                    
+                    -- Ownership
+                    shares_outstanding REAL,               -- Total shares outstanding
+                    held_percent_institutions REAL,        -- Institutional ownership (%)
+                    short_ratio REAL,                      -- Short ratio (days to cover)
+                    
+                    -- Analyst Targets
+                    target_mean_price REAL,                -- Mean analyst target price
+                    
+                    UNIQUE(symbol, date)                   -- One snapshot per symbol per day
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_fundamental_symbol_date 
+                ON fundamental_data(symbol, date)
+            """)
+            
+            # Market Events Table
+            # Corporate actions and scheduled events from yfinance
+            # Used for: Event-driven trading signals, risk management
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS market_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,                  -- Stock symbol
+                    event_type TEXT NOT NULL,              -- 'earnings', 'dividend', 'split'
+                    event_date TEXT NOT NULL,              -- Date of event (YYYY-MM-DD)
+                    
+                    -- Earnings Data
+                    earnings_date TEXT,                    -- Scheduled earnings announcement
+                    earnings_estimate_low REAL,            -- EPS estimate low
+                    earnings_estimate_high REAL,           -- EPS estimate high
+                    earnings_estimate_avg REAL,            -- EPS estimate average
+                    revenue_estimate_low REAL,             -- Revenue estimate low
+                    revenue_estimate_high REAL,            -- Revenue estimate high
+                    revenue_estimate_avg REAL,             -- Revenue estimate average
+                    
+                    -- Dividend Data
+                    dividend_amount REAL,                  -- Dividend per share
+                    
+                    -- Stock Split Data
+                    split_ratio TEXT,                      -- Split ratio (e.g., "2:1")
+                    
+                    created_at TEXT NOT NULL,              -- When this record was created
+                    
+                    UNIQUE(symbol, event_type, event_date) -- Prevent duplicate events
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_symbol_date 
+                ON market_events(symbol, event_date)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_type 
+                ON market_events(event_type)
+            """)
+            
+            # Macro Indicators Table
+            # Economic indicators and market-wide metrics
+            # Used for: Regime detection, risk-on/risk-off signals, correlation analysis
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS macro_indicators (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,                    -- Date (YYYY-MM-DD)
+                    
+                    -- Market Sentiment
+                    vix REAL,                              -- CBOE Volatility Index (fear gauge)
+                    vix_change REAL,                       -- Daily VIX change
+                    
+                    -- Interest Rates
+                    treasury_10y REAL,                     -- 10-Year Treasury Yield (%)
+                    treasury_2y REAL,                      -- 2-Year Treasury Yield (%)
+                    yield_curve_spread REAL,               -- 10Y - 2Y spread (inversion signal)
+                    
+                    -- Currency
+                    dxy REAL,                              -- US Dollar Index
+                    dxy_change REAL,                       -- Daily DXY change
+                    
+                    -- Commodities
+                    oil_price REAL,                        -- Crude Oil WTI price
+                    gold_price REAL,                       -- Gold spot price
+                    
+                    -- FRED Economic Data
+                    gdp_growth REAL,                       -- GDP growth rate (%)
+                    unemployment_rate REAL,                -- Unemployment rate (%)
+                    cpi REAL,                              -- Consumer Price Index
+                    fed_funds_rate REAL,                   -- Federal Funds Rate (%)
+                    
+                    UNIQUE(date)                           -- One entry per day
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_macro_date 
+                ON macro_indicators(date)
+            """)
+            
             conn.commit()
             logger.info("Database schema initialized successfully")
             

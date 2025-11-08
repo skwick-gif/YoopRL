@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import uuid
+import json
+import pandas as pd
+from datetime import datetime, timedelta
+import threading
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,6 +31,10 @@ load_dotenv()
 sys.path.append(str(Path(__file__).parent.parent))
 
 from database.db_manager import DatabaseManager
+from training.train import train_agent, load_data
+from models.model_manager import ModelManager
+from evaluation.backtester import run_backtest
+from utils.state_normalizer import StateNormalizer
 
 # Setup logging
 logging.basicConfig(
@@ -40,6 +49,24 @@ CORS(app)  # Enable CORS for React frontend
 
 # Initialize database
 db = DatabaseManager()
+
+# Initialize model manager
+# Use absolute path or relative from project root
+import os
+from pathlib import Path
+
+# Get project root (YoopRL directory)
+project_root = Path(__file__).parent.parent.parent  # main.py -> api -> backend -> YoopRL
+models_dir = project_root / 'backend' / 'models'
+
+print(f"[DEBUG] Models directory: {models_dir}")
+print(f"[DEBUG] Models directory exists: {models_dir.exists()}")
+
+model_manager = ModelManager(base_dir=str(models_dir))
+
+# Global dictionary to track training sessions
+training_sessions = {}
+training_threads = {}
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
@@ -197,24 +224,28 @@ def cleanup_database():
 @app.route('/api/training/download', methods=['POST'])
 def download_training_data():
     """
-    Download and prepare training data
+    Download and prepare training data with date-based incremental updates
     
     Request body:
     {
         "symbol": "IWM",
-        "period": "5y",
+        "start_date": "2020-01-01",
+        "end_date": "2024-11-08",
         "enable_sentiment": false,
+        "enable_social_media": false,
+        "enable_news": false,
+        "enable_market_events": false,
+        "enable_fundamental": false,
         "enable_multi_asset": false,
+        "enable_macro": false,
         "force_redownload": false
     }
     
     Smart caching behavior:
-    - If force_redownload=false (default):
-      * Checks cache, if fresh (< 1 day old) uses it
-      * If cache exists but old, downloads only new data since last update
-      * Merges old + new data
-    - If force_redownload=true:
-      * Always downloads full dataset from scratch
+    - Downloads data from start_date to end_date
+    - Checks SQL for existing data
+    - Only downloads missing date ranges (incremental update)
+    - Merges with existing SQL data
     
     Returns:
     {
@@ -224,12 +255,9 @@ def download_training_data():
         "features": 15,
         "train_size": 1006,
         "test_size": 252,
-        "cache_status": "incremental_update",  // or "full_download" or "cache_hit"
-        "files": {
-            "raw": "d:/YoopRL/data/training/IWM_raw.csv",
-            "train": "d:/YoopRL/data/training/IWM_train.csv",
-            "test": "d:/YoopRL/data/training/IWM_test.csv"
-        }
+        "date_range": "2020-01-01 to 2024-11-08",
+        "cache_status": "incremental_update",
+        "files": {...}
     }
     """
     try:
@@ -238,19 +266,46 @@ def download_training_data():
         # Get parameters from request
         data = request.json or {}
         symbol = data.get('symbol', 'IWM')
-        period = data.get('period', '5y')
+        start_date = data.get('start_date', '2020-01-01')
+        end_date = data.get('end_date', pd.Timestamp.now().strftime('%Y-%m-%d'))
         enable_sentiment = data.get('enable_sentiment', False)
+        enable_social_media = data.get('enable_social_media', False)
+        enable_news = data.get('enable_news', False)
+        enable_market_events = data.get('enable_market_events', False)
+        enable_fundamental = data.get('enable_fundamental', False)
         enable_multi_asset = data.get('enable_multi_asset', False)
+        enable_macro = data.get('enable_macro', False)
         force_redownload = data.get('force_redownload', False)
         
-        logger.info(f"Starting data download for {symbol} ({period}), force_redownload={force_redownload}...")
+        logger.info(f"Starting data download for {symbol} ({start_date} to {end_date})...")
+        
+        # Calculate period from dates (for backward compatibility)
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        years = (end - start).days / 365.25
+        
+        if years > 10:
+            period = "max"
+        elif years > 5:
+            period = "10y"
+        elif years > 2:
+            period = "5y"
+        elif years > 1:
+            period = "2y"
+        else:
+            period = "1y"
         
         # Download and prepare data
         prepared, split = prepare_training_data(
             symbol=symbol,
             period=period,
             enable_sentiment=enable_sentiment,
+            enable_social_media=enable_social_media,
+            enable_news=enable_news,
+            enable_market_events=enable_market_events,
+            enable_fundamental=enable_fundamental,
             enable_multi_asset=enable_multi_asset,
+            enable_macro=enable_macro,
             force_redownload=force_redownload,
         )
         
@@ -267,6 +322,7 @@ def download_training_data():
             'features': len(prepared.feature_names),
             'train_size': len(split.train),
             'test_size': len(split.test),
+            'date_range': f"{start_date} to {end_date}",
             'files': files
         }), 200
         
@@ -275,6 +331,627 @@ def download_training_data():
         return jsonify({
             'status': 'error',
             'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/train', methods=['POST'])
+def start_training():
+    """
+    Start a new training session
+    
+    Request body:
+    {
+        "agent_type": "PPO" or "SAC",
+        "symbol": "AAPL",
+        "hyperparameters": {
+            "learning_rate": 0.0003,
+            "gamma": 0.99,
+            "batch_size": 256,
+            "n_steps": 2048,
+            "episodes": 50000
+        },
+        "features": {
+            "price": true,
+            "volume": true,
+            "rsi": true,
+            ...
+        },
+        "training_settings": {
+            "start_date": "2023-01-01",
+            "end_date": "2024-11-01",
+            "commission": 1.0,
+            "initial_cash": 100000
+        }
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "training_id": "uuid",
+        "message": "Training started"
+    }
+    """
+    try:
+        data = request.json
+        
+        # Generate unique training ID
+        training_id = str(uuid.uuid4())
+        
+        # Initialize session tracking
+        training_sessions[training_id] = {
+            'status': 'starting',
+            'progress': 0,
+            'current_timestep': 0,
+            'current_reward': 0.0,
+            'started_at': datetime.now().isoformat(),
+            'config': data
+        }
+        
+        # Define background task
+        def run_training():
+            try:
+                training_sessions[training_id]['status'] = 'running'
+                
+                # Run training
+                result = train_agent(data)
+                
+                # Update session with result
+                training_sessions[training_id]['status'] = 'completed' if result['status'] == 'success' else 'failed'
+                training_sessions[training_id]['result'] = result
+                training_sessions[training_id]['completed_at'] = datetime.now().isoformat()
+                
+            except Exception as e:
+                logger.error(f"Training failed: {e}", exc_info=True)
+                training_sessions[training_id]['status'] = 'failed'
+                training_sessions[training_id]['error'] = str(e)
+                training_sessions[training_id]['completed_at'] = datetime.now().isoformat()
+        
+        # Start training in background thread
+        thread = threading.Thread(target=run_training, daemon=True)
+        thread.start()
+        training_threads[training_id] = thread
+        
+        logger.info(f"Training session {training_id} started for {data.get('symbol')} ({data.get('agent_type')})")
+        
+        return jsonify({
+            'status': 'success',
+            'training_id': training_id,
+            'message': 'Training started'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error starting training: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/progress/<training_id>', methods=['GET'])
+def get_training_progress(training_id):
+    """
+    Get training progress for a session
+    
+    Returns:
+    {
+        "status": "running",
+        "progress": 45.5,
+        "current_timestep": 22750,
+        "current_reward": 125.6,
+        "started_at": "2024-11-08T14:00:00",
+        "config": {...}
+    }
+    """
+    try:
+        if training_id not in training_sessions:
+            return jsonify({
+                'status': 'error',
+                'error': 'Training session not found'
+            }), 404
+        
+        session = training_sessions[training_id]
+        
+        # Read progress from file (updated by TrainingProgressCallback)
+        progress_file = Path('training_progress.json')
+        if progress_file.exists():
+            try:
+                with open(progress_file, 'r') as f:
+                    progress_data = json.load(f)
+                
+                session['progress'] = progress_data.get('progress_pct', 0)
+                session['current_timestep'] = progress_data.get('timestep', 0)
+                session['current_reward'] = progress_data.get('episode_reward', 0.0)
+                session['episode_count'] = progress_data.get('episode_count', 0)
+            except:
+                pass
+        
+        return jsonify(session), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting training progress: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/stop', methods=['POST'])
+def stop_training():
+    """
+    Stop a training session
+    
+    Request body:
+    {
+        "training_id": "uuid"
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "message": "Training stopped"
+    }
+    """
+    try:
+        data = request.json
+        training_id = data.get('training_id')
+        
+        if not training_id:
+            return jsonify({
+                'status': 'error',
+                'error': 'training_id is required'
+            }), 400
+        
+        if training_id not in training_sessions:
+            return jsonify({
+                'status': 'error',
+                'error': 'Training session not found'
+            }), 404
+        
+        # Update session status
+        training_sessions[training_id]['status'] = 'stopped'
+        training_sessions[training_id]['stopped_at'] = datetime.now().isoformat()
+        
+        # Note: Actually stopping the training thread is complex
+        # For now we just mark it as stopped
+        # TODO: Implement graceful stop with checkpoint saving
+        
+        logger.info(f"Training session {training_id} stopped")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Training stopped'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error stopping training: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/models', methods=['GET'])
+def list_models():
+    """
+    List all available trained models
+    
+    Query parameters:
+    - agent_type: Filter by agent type (optional)
+    - symbol: Filter by symbol (optional)
+    
+    Returns:
+    {
+        "status": "success",
+        "models": [
+            {
+                "model_id": "ppo_AAPL_v20241108_140000",
+                "agent_type": "PPO",
+                "symbol": "AAPL",
+                "version": "v20241108_140000",
+                "created": "2024-11-08T14:00:00",
+                "metrics": {
+                    "sharpe_ratio": 1.85,
+                    "total_return": 25.6
+                }
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        agent_type = request.args.get('agent_type')
+        symbol = request.args.get('symbol')
+        
+        # Get models from model manager
+        models = model_manager.list_models(
+            agent_type=agent_type.lower() if agent_type else None,
+            symbol=symbol
+        )
+        
+        return jsonify({
+            'status': 'success',
+            'models': models,
+            'count': len(models)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error listing models: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/load_model', methods=['POST'])
+def load_model():
+    """
+    Load a specific model
+    
+    Request body:
+    {
+        "model_id": "ppo_AAPL_v20241108_140000"
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "model": {
+            "model_id": "ppo_AAPL_v20241108_140000",
+            "agent_type": "PPO",
+            "metadata": {...}
+        }
+    }
+    """
+    try:
+        data = request.json
+        model_id = data.get('model_id')
+        
+        if not model_id:
+            return jsonify({
+                'status': 'error',
+                'error': 'model_id is required'
+            }), 400
+        
+        # Load model metadata
+        model_info = model_manager.get_model_info(model_id)
+        
+        if not model_info:
+            return jsonify({
+                'status': 'error',
+                'error': 'Model not found'
+            }), 404
+        
+        return jsonify({
+            'status': 'success',
+            'model': model_info
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/save_config', methods=['POST'])
+def save_config():
+    """
+    Save training configuration
+    
+    Request body:
+    {
+        "name": "my_config",
+        "agent_type": "PPO",
+        "config": {
+            "hyperparameters": {...},
+            "features": {...},
+            "training_settings": {...}
+        }
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "config_file": "configs/my_config_PPO.json"
+    }
+    """
+    try:
+        data = request.json
+        name = data.get('name', 'config')
+        agent_type = data.get('agent_type', 'PPO')
+        config = data.get('config', {})
+        
+        # Create configs directory
+        config_dir = Path('backend/configs')
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save config
+        config_file = config_dir / f"{name}_{agent_type}.json"
+        
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        logger.info(f"Configuration saved: {config_file}")
+        
+        return jsonify({
+            'status': 'success',
+            'config_file': str(config_file)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error saving config: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/load_config/<config_name>', methods=['GET'])
+def load_config(config_name):
+    """
+    Load training configuration
+    
+    Returns:
+    {
+        "status": "success",
+        "config": {
+            "hyperparameters": {...},
+            "features": {...},
+            "training_settings": {...}
+        }
+    }
+    """
+    try:
+        config_file = Path(f'backend/configs/{config_name}.json')
+        
+        if not config_file.exists():
+            return jsonify({
+                'status': 'error',
+                'error': 'Configuration not found'
+            }), 404
+        
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        return jsonify({
+            'status': 'success',
+            'config': config
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error loading config: {e}")
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/backtest', methods=['POST'])
+def run_backtest_endpoint():
+    """
+    Run backtest on a trained model
+    
+    Request body:
+    {
+        "model_path": "backend/models/ppo/ppo_AAPL_v20241108_140000.zip",
+        "agent_type": "PPO",
+        "symbol": "AAPL",
+        "start_date": "2024-01-01",
+        "end_date": "2024-11-01"
+    }
+    
+    Returns:
+    {
+        "status": "success",
+        "metrics": {
+            "sharpe_ratio": 1.85,
+            "sortino_ratio": 2.10,
+            "max_drawdown": -12.5,
+            "win_rate": 65.5,
+            "profit_factor": 1.85,
+            "total_return": 25.6,
+            "buy_and_hold_return": 18.2,
+            "alpha": 7.4,
+            ...
+        },
+        "results_file": "backend/results/backtest_PPO_20241108_140000.json"
+    }
+    """
+    try:
+        data = request.json
+        
+        model_path = data.get('model_path')
+        agent_type = data.get('agent_type', 'PPO')
+        symbol = data.get('symbol')
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        
+        if not model_path:
+            return jsonify({
+                'status': 'error',
+                'error': 'model_path is required'
+            }), 400
+        
+        # Load test data
+        # TODO: Replace with actual data loading from SQL
+        from training.train import load_data
+        
+        logger.info(f"Loading test data for {symbol} ({start_date} to {end_date})...")
+        _, test_data = load_data(symbol, start_date, end_date)
+        
+        logger.info(f"Running backtest on {model_path}...")
+        
+        # Run backtest
+        results = run_backtest(
+            model_path=model_path,
+            test_data=test_data,
+            agent_type=agent_type,
+            save_path=None  # Don't save for now
+        )
+        
+        # Optionally save results
+        results_file = None
+        if data.get('save_results', False):
+            results_file = f"backend/results/backtest_{agent_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            
+            from evaluation.backtester import Backtester
+            backtester = Backtester(model_path, test_data, agent_type)
+            backtester.save_results(results, results_file)
+        
+        logger.info(f"Backtest complete. Sharpe: {results['metrics']['sharpe_ratio']}, Return: {results['metrics']['total_return']}%")
+        
+        return jsonify({
+            'status': 'success',
+            'metrics': results['metrics'],
+            'results_file': results_file,
+            'equity_curve': results['equity_curve'][:100],  # First 100 points only
+            'total_trades': len(results['trades'])
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error running backtest: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/drift_status', methods=['GET'])
+def check_drift_status():
+    """
+    Check for data drift in recent market data
+    
+    Query parameters:
+    - symbol: Stock/ETF symbol (required)
+    - agent_type: PPO or SAC (required)
+    - days: Number of recent days to check (default 30)
+    
+    Returns:
+    {
+        "status": "success",
+        "drift_detected": true/false,
+        "severity": "medium/high/critical",
+        "affected_features": ["rsi", "macd"],
+        "drift_scores": {...},
+        "needs_retraining": true/false,
+        "recommendation": "Retrain model with recent data",
+        "last_check": "2024-11-08T14:00:00"
+    }
+    """
+    try:
+        symbol = request.args.get('symbol')
+        agent_type = request.args.get('agent_type', 'PPO')
+        days = request.args.get('days', 30, type=int)
+        
+        if not symbol:
+            return jsonify({
+                'status': 'error',
+                'error': 'symbol is required'
+            }), 400
+        
+        logger.info(f"Checking drift for {symbol} ({agent_type}) - last {days} days")
+        
+        # Load normalizer parameters (from training)
+        normalizer_path = f"backend/models/normalizer_{symbol}_{agent_type}.json"
+        
+        if not Path(normalizer_path).exists():
+            return jsonify({
+                'status': 'success',
+                'drift_detected': False,
+                'severity': 'unknown',
+                'affected_features': [],
+                'drift_scores': {},
+                'needs_retraining': False,
+                'recommendation': 'No trained model found. Train a model first to enable drift detection.',
+                'last_check': datetime.now().isoformat()
+            }), 200
+        
+        # Load normalizer
+        normalizer = StateNormalizer(method='zscore')
+        normalizer.load_params(normalizer_path)
+        
+        # Download recent market data
+        try:
+            import yfinance as yf
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days)
+            
+            ticker = yf.Ticker(symbol)
+            recent_df = ticker.history(start=start_date, end=end_date)
+            
+            if recent_df.empty:
+                return jsonify({
+                    'status': 'success',
+                    'drift_detected': False,
+                    'severity': 'unknown',
+                    'affected_features': [],
+                    'drift_scores': {},
+                    'needs_retraining': False,
+                    'recommendation': f'No recent data available for {symbol}',
+                    'last_check': datetime.now().isoformat()
+                }), 200
+            
+            # Prepare features (simple version - just use available columns)
+            # Map yfinance columns to our feature names
+            feature_mapping = {
+                'Close': 'price',
+                'Volume': 'volume'
+            }
+            
+            recent_data = pd.DataFrame()
+            for yf_col, feature_name in feature_mapping.items():
+                if yf_col in recent_df.columns:
+                    recent_data[feature_name] = recent_df[yf_col]
+            
+            # Add dummy features for now (TODO: calculate real technical indicators)
+            if 'price' in recent_data.columns:
+                recent_data['vix'] = 20.0  # Placeholder
+            
+            # Only use features that exist in both training and current data
+            available_features = [col for col in recent_data.columns if col in ['price', 'volume', 'vix']]
+            
+            if not available_features:
+                return jsonify({
+                    'status': 'success',
+                    'drift_detected': False,
+                    'severity': 'unknown',
+                    'affected_features': [],
+                    'drift_scores': {},
+                    'needs_retraining': False,
+                    'recommendation': 'Insufficient features for drift detection',
+                    'last_check': datetime.now().isoformat()
+                }), 200
+            
+            recent_features = recent_data[available_features].values
+            
+        except Exception as data_error:
+            logger.error(f"Error loading recent data: {data_error}")
+            return jsonify({
+                'status': 'error',
+                'error': f'Failed to load recent market data: {str(data_error)}',
+                'drift_detected': False,
+                'needs_retraining': False
+            }), 500
+        
+        # Check drift
+        drift_results = normalizer.check_drift_status(
+            recent_data=recent_features,
+            feature_names=available_features,
+            threshold=0.4
+        )
+        
+        logger.info(f"Drift check complete: drift_detected={drift_results.get('drift_detected')}, "
+                   f"severity={drift_results.get('severity')}")
+        
+        return jsonify(drift_results), 200
+        
+    except Exception as e:
+        logger.error(f"Error checking drift: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'needs_retraining': False
         }), 500
 
 

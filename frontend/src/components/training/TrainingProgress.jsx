@@ -1,5 +1,5 @@
 /**
- * TrainingProgress.jsx
+ * TrainingProgress.jsx (Updated - Phase 1)
  * Part of: Training Tab
  * 
  * Purpose: Displays training progress, logs, and results
@@ -8,14 +8,32 @@
  * - Training Progress: Real-time progress display with download/training status
  * - Training Results: Best trial, average reward, training time
  * 
- * State Management:
- * - Download progress: Tracks data download completion
- * - Training progress: Tracks Optuna trials and episode completion
- * - Data Downloaded flag: Controls when training can start
+ * Phase 1 Updates:
+ * - Added polling for live training progress
+ * - Integrated with trainingAPI.getProgress()
+ * - Shows training ID for active sessions
+ * - Added stopTraining functionality
+ * - Displays real-time episode/reward/loss updates
+ * 
+ * Props:
+ * - isDownloading: Boolean for download state
+ * - isTraining: Boolean for training state
+ * - downloadProgress: Number (0-100)
+ * - trainingProgress: Number (0-100)
+ * - dataDownloaded: Boolean - enables training button
+ * - trainingId: String - active training session ID
+ * - handleDownloadData: Function to download data
+ * - handleStartTraining: Function to start training
+ * 
+ * Wiring:
+ * - Polls getProgress API every 5 seconds during training
+ * - Updates progress display with episode/reward/loss
+ * - Calls stopTraining API when stop button clicked
  */
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Card } from '../common/UIComponents';
+import { getProgress, stopTraining } from '../../services/trainingAPI';
 
 function TrainingProgress({ 
   isDownloading, 
@@ -23,9 +41,46 @@ function TrainingProgress({
   downloadProgress, 
   trainingProgress, 
   dataDownloaded,
+  downloadMessage, // NEW: Non-blocking message
+  trainingId,
   handleDownloadData,
   handleStartTraining 
 }) {
+  const [progressData, setProgressData] = useState(null);
+
+  // Poll for training progress when training is active
+  useEffect(() => {
+    if (!isTraining || !trainingId) {
+      return;
+    }
+
+    const pollProgress = async () => {
+      const result = await getProgress(trainingId);
+      if (result.success) {
+        setProgressData(result.data);
+      }
+    };
+
+    // Initial fetch
+    pollProgress();
+
+    // Poll every 5 seconds
+    const interval = setInterval(pollProgress, 5000);
+
+    return () => clearInterval(interval);
+  }, [isTraining, trainingId]);
+
+  // Handle stop training
+  const handleStopTraining = async () => {
+    if (!trainingId) return;
+
+    const result = await stopTraining(trainingId);
+    if (result.success) {
+      alert('Training stopped successfully');
+    } else {
+      alert(`Failed to stop training: ${result.error}`);
+    }
+  };
   return (
     <>
       {/* Action Bar - Main control buttons */}
@@ -65,14 +120,33 @@ function TrainingProgress({
         </Button>
         
         {/* Stop Training Button: Halts training immediately */}
-        <Button variant="secondary" disabled={isTraining}>Stop Training</Button>
+        <Button 
+          variant="secondary" 
+          onClick={handleStopTraining}
+          disabled={!isTraining}
+        >
+          Stop Training
+        </Button>
         
         {/* Load Model Button:
             - Loads a previously saved trained model from disk
             - Allows you to continue training or use for live trading
             - Skip training if you already have a good model
         */}
-        <Button variant="secondary">Load Model</Button>
+        <Button 
+          variant="secondary"
+          onClick={() => {
+            // This will be handled by parent component (TabTraining)
+            // by showing ModelSelector dropdown
+            if (window.onLoadModelClick) {
+              window.onLoadModelClick();
+            } else {
+              alert('Model selection will appear below. Scroll down to see "Select Trained Model" dropdown.');
+            }
+          }}
+        >
+          Load Model
+        </Button>
         
         {/* Save Config Button: Saves current hyperparameter configuration */}
         <Button variant="secondary">Save Config</Button>
@@ -82,6 +156,32 @@ function TrainingProgress({
       <Card style={{ marginTop: '12px' }}>
         <div className="control-title">Training Progress</div>
         <div className="log-display" style={{ maxHeight: '200px' }}>
+          
+          {/* Non-blocking Download Message */}
+          {downloadMessage && (
+            <div style={{
+              padding: '12px',
+              marginBottom: '10px',
+              backgroundColor: downloadMessage.startsWith('✅') ? '#1e4620' : '#4d1f1f',
+              border: downloadMessage.startsWith('✅') ? '1px solid #4CAF50' : '1px solid #f44336',
+              borderRadius: '4px',
+              color: downloadMessage.startsWith('✅') ? '#4CAF50' : '#f44336',
+              fontWeight: 600,
+              fontSize: '14px',
+              animation: 'fadeIn 0.3s ease-in',
+              whiteSpace: 'pre-line'
+            }}>
+              {downloadMessage}
+            </div>
+          )}
+          
+          {/* Training ID Display */}
+          {trainingId && (
+            <div className="log-info" style={{ color: '#4CAF50', fontWeight: 600 }}>
+              Training ID: {trainingId}
+            </div>
+          )}
+
           {/* Download Progress Display */}
           {isDownloading && (
             <>
@@ -113,11 +213,11 @@ function TrainingProgress({
           )}
 
           {/* Training Progress Display */}
-          {isTraining && (
+          {isTraining && progressData && (
             <>
-              <div className="log-info">[{new Date().toLocaleTimeString()}] Training started: Selected agents</div>
+              <div className="log-info">[{new Date().toLocaleTimeString()}] Training started: {progressData.status}</div>
               <div className="log-info" style={{ fontWeight: 600, marginTop: '8px' }}>
-                🔄 Training... {trainingProgress}%
+                🔄 Training... {progressData.progress || 0}%
               </div>
               <div style={{ 
                 width: '100%', 
@@ -128,17 +228,25 @@ function TrainingProgress({
                 margin: '8px 0' 
               }}>
                 <div style={{ 
-                  width: `${trainingProgress}%`, 
+                  width: `${progressData.progress || 0}%`, 
                   height: '100%', 
                   background: '#3fb950',
                   transition: 'width 0.3s ease'
                 }}></div>
               </div>
-              <div className="log-info">[{new Date().toLocaleTimeString()}] Running Optuna optimization trials...</div>
-              <div className="log-debug">Episodes running, optimizing hyperparameters...</div>
-              {trainingProgress === 100 && (
+              <div className="log-info">Episode: {progressData.current_episode?.toLocaleString() || 0} / {progressData.total_episodes?.toLocaleString() || 0}</div>
+              <div className="log-debug">Avg Reward: {progressData.avg_reward?.toFixed(2) || 'N/A'} | Loss: {progressData.recent_loss?.toFixed(4) || 'N/A'}</div>
+              <div className="log-debug">Elapsed: {progressData.elapsed_time || 'N/A'} | ETA: {progressData.eta || 'Calculating...'}</div>
+              {progressData.progress === 100 && (
                 <div className="log-success">✓ Training complete</div>
               )}
+            </>
+          )}
+
+          {isTraining && !progressData && (
+            <>
+              <div className="log-info">[{new Date().toLocaleTimeString()}] Training started</div>
+              <div className="log-debug">Waiting for progress updates...</div>
             </>
           )}
 
@@ -157,45 +265,37 @@ function TrainingProgress({
               <div className="log-info">Click "Start Training" to begin optimization</div>
             </>
           )}
-
-          {/* Example Log (shown only when not actively downloading/training) */}
-          {!isDownloading && !isTraining && (
-            <>
-              <div className="log-info" style={{ marginTop: '12px', opacity: 0.5 }}>[2024-11-07 14:30:15] Example: Training started: PPO Agent on AAPL</div>
-              <div className="log-info" style={{ opacity: 0.5 }}>[2024-11-07 14:30:20] Optuna Study: Trial 1/100</div>
-              <div className="log-info" style={{ opacity: 0.5 }}>[2024-11-07 14:30:45] Episode 100/50000 | Reward: 0.42 | Loss: 0.023</div>
-              <div className="log-success" style={{ opacity: 0.5 }}>[2024-11-07 14:31:40] Trial 1 complete | Score: 0.65</div>
-            </>
-          )}
         </div>
       </Card>
 
-      {/* Training Results Summary */}
-      <Card style={{ marginTop: '12px' }}>
-        <div className="control-title">Training Results</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
-          {/* Best Optuna Trial */}
-          <Card style={{ background: '#0d1117', padding: '10px' }}>
-            <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Best Optuna Trial</div>
-            <div style={{ fontSize: '16px', fontWeight: 600 }}>Trial #47</div>
-            <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>LR: 0.00025 | γ: 0.98</div>
-          </Card>
-          
-          {/* Average Reward */}
-          <Card style={{ background: '#0d1117', padding: '10px' }}>
-            <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Avg Reward</div>
-            <div style={{ fontSize: '16px', fontWeight: 600, color: '#3fb950' }}>+0.87</div>
-            <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>Last 1000 episodes</div>
-          </Card>
-          
-          {/* Training Time */}
-          <Card style={{ background: '#0d1117', padding: '10px' }}>
-            <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Training Time</div>
-            <div style={{ fontSize: '16px', fontWeight: 600 }}>2h 34m</div>
-            <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>Completed: 05/11/2024</div>
-          </Card>
-        </div>
-      </Card>
+      {/* Training Results Summary - Only show when training is complete and has real results */}
+      {trainingProgress === 100 && trainingId && (
+        <Card style={{ marginTop: '12px' }}>
+          <div className="control-title">Training Results</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
+            {/* Best Optuna Trial */}
+            <Card style={{ background: '#0d1117', padding: '10px' }}>
+              <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Best Trial</div>
+              <div style={{ fontSize: '16px', fontWeight: 600 }}>Waiting for results...</div>
+              <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>Check logs for details</div>
+            </Card>
+            
+            {/* Average Reward */}
+            <Card style={{ background: '#0d1117', padding: '10px' }}>
+              <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Avg Reward</div>
+              <div style={{ fontSize: '16px', fontWeight: 600, color: '#3fb950' }}>N/A</div>
+              <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>Last 1000 episodes</div>
+            </Card>
+            
+            {/* Training Time */}
+            <Card style={{ background: '#0d1117', padding: '10px' }}>
+              <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>Training Time</div>
+              <div style={{ fontSize: '16px', fontWeight: 600 }}>N/A</div>
+              <div style={{ fontSize: '10px', color: '#6e7681', marginTop: '2px' }}>Completed: N/A</div>
+            </Card>
+          </div>
+        </Card>
+      )}
     </>
   );
 }

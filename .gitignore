@@ -275,3 +275,10 @@ TODO.md
 NOTES.md
 scratch/
 experiments/
+
+# ============================================
+# TEST FILES
+# ============================================
+# Test scripts created during development/debugging
+test_*.py
+Test Files/
