@@ -224,10 +224,18 @@ $RECYCLE.BIN/
 # TRAINED MODELS (Large files)
 # ============================================
 # RL model files - these can be large, store separately
-models/*.zip
-models/*.pkl
-models/*.pt
-models/*.pth
+backend/models/**/*.zip
+backend/models/**/*.pkl
+backend/models/**/*.pt
+backend/models/**/*.pth
+backend/models/**/*_metadata.json
+backend/models/normalizer_*.json
+backend/models/**/tensorboard/
+backend/models/**/optuna_trials/
+backend/models/**/archive/
+
+# Training progress snapshots
+training_progress.json
 *.h5
 *.pb
 

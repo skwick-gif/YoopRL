@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 import json
 from datetime import datetime
+import math
 import numpy as np
 import pandas as pd
 import optuna
@@ -33,6 +34,31 @@ from utils.state_normalizer import StateNormalizer
 from models.model_manager import ModelManager
 from config.training_config import TrainingConfig
 from evaluation.backtester import evaluate_trained_model
+
+
+def _resolve_hyperparameters(config_dict: dict) -> dict:
+    """Merge hyperparameter sources into a single dict.
+
+    Supports both the generic ``hyperparameters`` key (used by the API)
+    and the agent-specific keys produced by ``TrainingConfig``.
+    Later sources override earlier ones so that explicit agent presets win.
+    """
+
+    agent_type = config_dict.get('agent_type', '').upper()
+
+    merged: dict = {}
+
+    # Generic hyperparameters from API payloads
+    if isinstance(config_dict.get('hyperparameters'), dict):
+        merged.update(config_dict['hyperparameters'])
+
+    # Agent-specific blocks from TrainingConfig dataclasses
+    if agent_type == 'PPO' and isinstance(config_dict.get('ppo_hyperparameters'), dict):
+        merged.update(config_dict['ppo_hyperparameters'])
+    elif agent_type == 'SAC' and isinstance(config_dict.get('sac_hyperparameters'), dict):
+        merged.update(config_dict['sac_hyperparameters'])
+
+    return merged
 
 
 class TrainingProgressCallback(BaseCallback):
@@ -178,7 +204,15 @@ def load_data(symbol: str, start_date: str, end_date: str, features: dict = None
     if 'Close' in train_data.columns:
         train_data = train_data.rename(columns={'Close': 'price'})
         test_data = test_data.rename(columns={'Close': 'price'})
-    
+
+    # Clean up any rows with missing timestamps that can appear after merges
+    train_data = train_data[train_data.index.notna()].copy()
+    test_data = test_data[test_data.index.notna()].copy()
+
+    # Ensure chronological order in case upstream sources return unsorted data
+    train_data = train_data.sort_index()
+    test_data = test_data.sort_index()
+
     # Rename 'Volume' to 'volume' for consistency
     if 'Volume' in train_data.columns:
         train_data = train_data.rename(columns={'Volume': 'volume'})
@@ -234,7 +268,12 @@ def optimize_hyperparameters_with_optuna(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     
     agent_type = config_dict['agent_type'].upper()
-    initial_capital = config_dict['training_settings'].get('initial_capital', 100000)
+    base_hyperparams = _resolve_hyperparameters(config_dict)
+    if base_hyperparams is None:
+        base_hyperparams = {}
+    initial_capital = config_dict['training_settings'].get('initial_capital')
+    if initial_capital is None:
+        initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
     commission = config_dict['training_settings'].get('commission', 1.0)
     
     def objective(trial):
@@ -249,7 +288,7 @@ def optimize_hyperparameters_with_optuna(
                 'n_steps': trial.suggest_categorical('n_steps', [1024, 2048, 4096]),
                 'ent_coef': trial.suggest_float('ent_coef', 0.0, 0.1),
                 'clip_range': trial.suggest_float('clip_range', 0.1, 0.3),
-                'episodes': config_dict['hyperparameters'].get('episodes', 10000)  # Keep episodes fixed
+                'episodes': base_hyperparams.get('episodes', 10000)  # Keep episodes fixed
             }
         else:  # SAC
             trial_hyperparams = {
@@ -258,7 +297,7 @@ def optimize_hyperparameters_with_optuna(
                 'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512]),
                 'tau': trial.suggest_float('tau', 0.001, 0.02),
                 'ent_coef': trial.suggest_categorical('ent_coef', ['auto', 0.1, 0.2, 0.5]),
-                'episodes': config_dict['hyperparameters'].get('episodes', 10000)
+                'episodes': base_hyperparams.get('episodes', 10000)
             }
         
         try:
@@ -314,7 +353,8 @@ def optimize_hyperparameters_with_optuna(
                 episode_return = 0
                 
                 while not done:
-                    action, _ = agent.predict(obs, deterministic=True)
+                    prediction = agent.predict(obs, deterministic=True)
+                    action = prediction[0] if isinstance(prediction, tuple) else prediction
                     step_result = test_env.step(action)
                     
                     # Handle different return formats (gym vs gymnasium)
@@ -366,7 +406,7 @@ def optimize_hyperparameters_with_optuna(
     print(f"{'='*70}\n")
     
     # Merge best params with original config
-    optimized_hyperparams = {**config_dict['hyperparameters'], **best_params}
+    optimized_hyperparams = {**base_hyperparams, **best_params}
     
     return optimized_hyperparams
 
@@ -410,14 +450,8 @@ def train_agent(config) -> dict:
     else:
         config_dict = config
     
-    # Extract hyperparameters based on agent type
-    if config_dict['agent_type'].upper() == 'PPO':
-        hyperparams = config_dict.get('ppo_hyperparameters', {})
-    elif config_dict['agent_type'].upper() == 'SAC':
-        hyperparams = config_dict.get('sac_hyperparameters', {})
-    else:
-        # Fallback to 'hyperparameters' key if exists
-        hyperparams = config_dict.get('hyperparameters', {})
+    # Extract hyperparameters (supports both API payloads and TrainingConfig output)
+    hyperparams = _resolve_hyperparameters(config_dict)
     
     print(f"\n{'='*70}")
     print(f">> Starting Training: {config_dict['agent_type']} Agent")
@@ -514,7 +548,9 @@ def train_agent(config) -> dict:
         # 3. Create Environment
         print("\n[INFO] Creating trading environment...")
         
-        initial_capital = config_dict['training_settings'].get('initial_capital', 100000)
+        initial_capital = config_dict['training_settings'].get('initial_capital')
+        if initial_capital is None:
+            initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
         commission = config_dict['training_settings'].get('commission', 1.0)
         
         if config_dict['agent_type'].upper() == 'PPO':
@@ -575,15 +611,56 @@ def train_agent(config) -> dict:
         
         # 5. Train Agent
         print("\n[TRAIN] Training agent...")
-        
-        # Calculate total timesteps
-        episodes = hyperparams.get('episodes', 50000)
-        steps_per_episode = len(train_data)
-        total_timesteps = episodes * steps_per_episode
-        
-        print(f"   Episodes: {episodes}")
+
+        # Calculate total timesteps with sane defaults and caps
+        steps_per_episode = max(1, len(train_data))
+        requested_total_timesteps = (
+            hyperparams.get('total_timesteps')
+            or config_dict['training_settings'].get('total_timesteps')
+        )
+        requested_episode_budget = hyperparams.get('episodes')
+        fallback_episode_budget = config_dict['training_settings'].get('episode_budget')
+
+        resolved_episode_budget = None
+        if requested_total_timesteps:
+            total_timesteps_requested = int(requested_total_timesteps)
+        else:
+            if requested_episode_budget is not None and requested_episode_budget > 0:
+                resolved_episode_budget = int(requested_episode_budget)
+            elif fallback_episode_budget is not None and fallback_episode_budget > 0:
+                resolved_episode_budget = int(fallback_episode_budget)
+            else:
+                resolved_episode_budget = 1
+
+            total_timesteps_requested = resolved_episode_budget * steps_per_episode
+
+        max_total_timesteps = config_dict['training_settings'].get('max_total_timesteps', 1_000_000)
+        if not isinstance(max_total_timesteps, int) or max_total_timesteps <= 0:
+            max_total_timesteps = 1_000_000
+
+        total_timesteps = total_timesteps_requested
+        if total_timesteps > max_total_timesteps:
+            print(
+                f"   Requested total timesteps {total_timesteps:,} exceed limit of "
+                f"{max_total_timesteps:,}. Capping budget."
+            )
+            total_timesteps = max_total_timesteps
+
+        total_timesteps = max(steps_per_episode, total_timesteps)
+        effective_episodes = max(1, math.ceil(total_timesteps / steps_per_episode))
+
+        if resolved_episode_budget is None and requested_episode_budget is not None:
+            resolved_episode_budget = int(requested_episode_budget)
+        elif resolved_episode_budget is None:
+            resolved_episode_budget = effective_episodes
+
+        print(f"   Episodes requested: {resolved_episode_budget}")
+        if requested_total_timesteps:
+            print(f"   Total timesteps requested: {total_timesteps_requested:,}")
         print(f"   Steps per episode: {steps_per_episode}")
         print(f"   Total timesteps: {total_timesteps:,}")
+        print(f"   Effective episodes: {effective_episodes}")
+        
         
         # Create progress callback
         progress_callback = TrainingProgressCallback(
@@ -667,8 +744,10 @@ def train_agent(config) -> dict:
         # Generate version
         version = datetime.now().strftime("v%Y%m%d_%H%M%S")
         
-        # Save model
-        model_path = agent.save(version=version)
+        model_manager = ModelManager(base_dir='backend/models')
+        agent_type_lower = config_dict['agent_type'].lower()
+        symbol_upper = config_dict['symbol'].upper()
+        model_path = Path(model_manager.base_dir) / agent_type_lower / f"{agent_type_lower}_{symbol_upper}_{version}.zip"
         
         # Create metadata with REAL metrics
         metadata = {
@@ -683,8 +762,10 @@ def train_agent(config) -> dict:
             'training_settings': config_dict['training_settings'],
             'train_samples': len(train_data),
             'test_samples': len(test_data),
-            'episodes': hyperparams.get('episodes', 50000),
-            'total_timesteps': total_timesteps,
+            'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
+            'episodes': int(effective_episodes),
+            'total_timesteps_requested': int(total_timesteps_requested),
+            'total_timesteps': int(total_timesteps),
             'training_duration_seconds': training_duration,
             'model_path': str(model_path),
             'normalizer_path': normalizer_path,
@@ -705,13 +786,12 @@ def train_agent(config) -> dict:
             'trade_history': eval_results.get('trades', [])
         }
         
-        # Save metadata using ModelManager
-        model_manager = ModelManager(base_dir='backend/models')
         model_manager.save_model(
             model=agent.model,
-            agent_type=config_dict['agent_type'].lower(),
+            agent_type=config_dict['agent_type'],
             symbol=config_dict['symbol'],
-            metadata=metadata
+            metadata=metadata,
+            version=version
         )
         
         print(f"[OK] Model saved: {model_path}")

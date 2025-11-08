@@ -47,8 +47,8 @@ class RetrainingScheduler:
         self,
         config: dict,
         frequency: str = 'Weekly',
-        performance_threshold: float = 0.0,
-        min_sharpe: float = 1.0
+    performance_threshold: float = 0.2,
+    min_sharpe: float = 1.5
     ):
         """
         Initialize retraining scheduler.
@@ -66,7 +66,10 @@ class RetrainingScheduler:
         
         self.model_manager = ModelManager()
         
-        logger.info(f"RetrainingScheduler initialized: {frequency}, threshold={performance_threshold}")
+        logger.info(
+            f"RetrainingScheduler initialized: {frequency}, "
+            f"threshold={performance_threshold}, min_sharpe={min_sharpe}"
+        )
     
     def retrain(self) -> dict:
         """
@@ -89,7 +92,8 @@ class RetrainingScheduler:
             train_data, test_data = load_data(
                 symbol=self.config['symbol'],
                 start_date=self.config['training_settings']['start_date'],
-                end_date=datetime.now().strftime('%Y-%m-%d')  # Up to today
+                end_date=datetime.now().strftime('%Y-%m-%d'),  # Up to today
+                features=self.config.get('features')
             )
             
             logger.info(f"✅ Data loaded: {len(train_data)} train, {len(test_data)} test\n")
@@ -177,15 +181,12 @@ class RetrainingScheduler:
                     'deployment_reason': reason,
                     'metrics': backtest_results['metrics']
                 }
-                
-                # Save updated metadata
-                model_id = f"{self.config['agent_type'].lower()}_{self.config['symbol']}_{new_version}"
-                self.model_manager.save_model(
-                    model=None,  # Already saved
+
+                self.model_manager.update_model_metadata(
                     agent_type=self.config['agent_type'],
                     symbol=self.config['symbol'],
-                    metadata=metadata_update,
-                    version=new_version
+                    version=new_version,
+                    updates=metadata_update
                 )
                 
                 # Cleanup old models (keep last 10)
@@ -303,7 +304,7 @@ if __name__ == '__main__':
     scheduler = RetrainingScheduler(
         config=config,
         frequency='Weekly',
-        performance_threshold=0.1,  # Require +0.1 Sharpe improvement
+        performance_threshold=0.2,  # Require +0.2 Sharpe improvement
         min_sharpe=1.5  # Minimum Sharpe ratio to deploy
     )
     

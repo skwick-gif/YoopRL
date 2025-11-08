@@ -38,6 +38,11 @@ export const useTrainingState = () => {
   const [ppoRiskPenalty, setPpoRiskPenalty] = useState(-0.5);
   const [ppoEpisodes, setPpoEpisodes] = useState(50000);
   const [ppoRetrain, setPpoRetrain] = useState('Weekly');
+  
+  // PPO Live Trading Settings
+  const [ppoTimeFrame, setPpoTimeFrame] = useState('daily');
+  const [ppoInitialCapital, setPpoInitialCapital] = useState(10000);
+  const [ppoMaxPosition, setPpoMaxPosition] = useState(50);
 
   // ===== SAC Hyperparameters (Leveraged ETF Trading) =====
   const [sacSymbol, setSacSymbol] = useState('TNA');
@@ -47,6 +52,11 @@ export const useTrainingState = () => {
   const [sacVolPenalty, setSacVolPenalty] = useState(-0.3);
   const [sacEpisodes, setSacEpisodes] = useState(45000);
   const [sacRetrain, setSacRetrain] = useState('Weekly');
+  
+  // SAC Live Trading Settings
+  const [sacTimeFrame, setSacTimeFrame] = useState('daily');
+  const [sacInitialCapital, setSacInitialCapital] = useState(10000);
+  const [sacMaxPosition, setSacMaxPosition] = useState(50);
 
   // ===== Training Settings =====
   // Get current date in YYYY-MM-DD format
@@ -280,6 +290,9 @@ export const useTrainingState = () => {
     ppoRiskPenalty, setPpoRiskPenalty,
     ppoEpisodes, setPpoEpisodes,
     ppoRetrain, setPpoRetrain,
+    ppoTimeFrame, setPpoTimeFrame,
+    ppoInitialCapital, setPpoInitialCapital,
+    ppoMaxPosition, setPpoMaxPosition,
 
     // SAC State
     sacSymbol, setSacSymbol,
@@ -289,6 +302,9 @@ export const useTrainingState = () => {
     sacVolPenalty, setSacVolPenalty,
     sacEpisodes, setSacEpisodes,
     sacRetrain, setSacRetrain,
+    sacTimeFrame, setSacTimeFrame,
+    sacInitialCapital, setSacInitialCapital,
+    sacMaxPosition, setSacMaxPosition,
 
     // Training Settings
     startDate, setStartDate,

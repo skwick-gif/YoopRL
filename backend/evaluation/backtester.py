@@ -54,10 +54,10 @@ class Backtester:
         
         # Create environment
         if self.agent_type == 'PPO':
-            self.env = StockTradingEnv(data=test_data)
+            self.env = StockTradingEnv(df=test_data)
             self.agent = PPOAgent(env=self.env, hyperparameters={})
         elif self.agent_type == 'SAC':
-            self.env = ETFTradingEnv(data=test_data)
+            self.env = ETFTradingEnv(df=test_data)
             self.agent = SACAgent(env=self.env, hyperparameters={})
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
@@ -96,7 +96,7 @@ class Backtester:
         done = False
         
         # Tracking variables
-        equity_curve = [self.env.initial_cash]
+        equity_curve = [self.env.initial_capital]
         trades = []
         actions_log = []
         
@@ -106,7 +106,8 @@ class Backtester:
         # Run episode
         while not done and step < len(self.test_data):
             # Predict action (deterministic for backtesting)
-            action, _ = self.agent.predict(obs, deterministic=True)
+            prediction = self.agent.predict(obs, deterministic=True)
+            action = prediction[0] if isinstance(prediction, tuple) else prediction
             
             # Execute action
             obs, reward, done, info = self.env.step(action)
@@ -148,7 +149,7 @@ class Backtester:
         metrics = calculate_all_metrics(
             equity_curve=np.array(equity_curve),
             trades=trades,
-            initial_balance=self.env.initial_cash
+            initial_balance=self.env.initial_capital
         )
         
         # Calculate Buy & Hold benchmark

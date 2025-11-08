@@ -160,6 +160,9 @@ class TrainingSettings:
     max_position_size: float = 1.0
     optuna_trials: int = 100
     normalize_obs: bool = True
+    total_timesteps: Optional[int] = None
+    max_total_timesteps: int = 1_000_000
+    episode_budget: Optional[int] = None
     
     def validate(self) -> List[str]:
         """Validate training settings."""
@@ -186,6 +189,18 @@ class TrainingSettings:
         
         if self.optuna_trials < 10:
             errors.append("Optuna trials must be at least 10")
+
+        if self.total_timesteps is not None and self.total_timesteps <= 0:
+            errors.append("Total timesteps must be positive")
+
+        if self.max_total_timesteps is not None and self.max_total_timesteps <= 0:
+            errors.append("Max total timesteps must be positive")
+
+        if self.episode_budget is not None and self.episode_budget <= 0:
+            errors.append("Episode budget must be positive when provided")
+
+        if self.total_timesteps and self.max_total_timesteps and self.total_timesteps > self.max_total_timesteps:
+            errors.append("Total timesteps cannot exceed max total timesteps")
         
         return errors
 

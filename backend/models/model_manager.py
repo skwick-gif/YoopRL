@@ -127,6 +127,36 @@ class ModelManager:
         
         print(f"✅ Model saved: {model_id}")
         return model_id
+
+    def update_model_metadata(
+        self,
+        agent_type: str,
+        symbol: str,
+        version: str,
+        updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Update metadata for an existing model without touching the model file."""
+
+        agent_dir = self.base_dir / agent_type.lower()
+        metadata_path = agent_dir / f"{agent_type.lower()}_{symbol.upper()}_{version}_metadata.json"
+
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        merged = metadata.copy()
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key].update(value)
+            else:
+                merged[key] = value
+
+        with open(metadata_path, 'w') as f:
+            json.dump(merged, f, indent=2)
+
+        return merged
     
     def load_model(
         self,
