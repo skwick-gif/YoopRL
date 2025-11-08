@@ -1,0 +1,277 @@
+# YoopRL Trading System - Git Ignore File
+# Prevents unnecessary files from being committed to Git
+
+# ============================================
+# DATABASE FILES
+# ============================================
+# SQLite database files - these are local and should not be in Git
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/*.db
+data/*.csv
+data/*.json
+
+# ============================================
+# PYTHON
+# ============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# Environments
+.env
+.env.local
+.env.*.local
+
+# ============================================
+# C# / .NET (IBKR Bridge)
+# ============================================
+# Build results
+backend/IBKR_Bridge/csharp_bridge/bin/
+backend/IBKR_Bridge/csharp_bridge/obj/
+backend/IBKR_Bridge/csharp_bridge/out/
+backend/IBKR_Bridge/csharp_bridge/.vs/
+backend/IBKR_Bridge/csharp_bridge/*.user
+backend/IBKR_Bridge/csharp_bridge/*.suo
+
+# NuGet packages
+backend/IBKR_Bridge/csharp_bridge/packages/
+*.nupkg
+*.snupkg
+
+# Visual Studio cache/options
+.vs/
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# ============================================
+# NODE.JS / REACT (Frontend)
+# ============================================
+# Dependencies
+frontend/node_modules/
+frontend/.pnp
+frontend/.pnp.js
+
+# Testing
+frontend/coverage
+
+# Production build
+frontend/build
+
+# Misc
+frontend/.DS_Store
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# npm / yarn
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Next.js (if used in future)
+.next/
+out/
+
+# Nuxt.js (if used in future)
+.nuxt
+dist
+
+# ============================================
+# LOGS
+# ============================================
+# Application logs
+*.log
+logs/
+*.log.*
+
+# ============================================
+# IDE / EDITOR
+# ============================================
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# ============================================
+# OPERATING SYSTEM
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ============================================
+# TRAINED MODELS (Large files)
+# ============================================
+# RL model files - these can be large, store separately
+models/*.zip
+models/*.pkl
+models/*.pt
+models/*.pth
+*.h5
+*.pb
+
+# ============================================
+# SECRETS & CREDENTIALS
+# ============================================
+# Never commit credentials!
+*.key
+*.pem
+*.p12
+secrets/
+credentials/
+.env
+.env.*
+config/secrets.json
+config/credentials.json
+
+# IBKR credentials
+ibkr_credentials.json
+tws_credentials.txt
+
+# ============================================
+# TEMPORARY FILES
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+~*
+
+# ============================================
+# DOCUMENTATION (Generated)
+# ============================================
+# Auto-generated docs
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# ============================================
+# CUSTOM PROJECT FILES
+# ============================================
+# Any custom files you want to exclude
+TODO.md
+NOTES.md
+scratch/
+experiments/
