@@ -26,7 +26,7 @@
  * - Export to CSV
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { loadModels } from '../../services/trainingAPI';
 
 const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
@@ -38,12 +38,7 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
   const [selectedModel, setSelectedModel] = useState(null);
   const [symbolFilter, setSymbolFilter] = useState(filterSymbol || '');
 
-  // Fetch models on mount
-  useEffect(() => {
-    fetchModels();
-  }, [agentType]);
-
-  const fetchModels = async () => {
+  const fetchModels = useCallback(async () => {
     setLoading(true);
     setError(null);
 
@@ -62,7 +57,12 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
     }
 
     setLoading(false);
-  };
+  }, [agentType]);
+
+  // Fetch models on mount
+  useEffect(() => {
+    fetchModels();
+  }, [fetchModels]);
 
   // Sort handler
   const handleSort = (field) => {

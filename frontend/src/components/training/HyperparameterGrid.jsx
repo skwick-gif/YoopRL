@@ -24,15 +24,30 @@
 
 import React from 'react';
 import { ParamItem, Card } from '../common/UIComponents';
+import ConfigManager from './ConfigManager';
 
-function HyperparameterGrid({ agentType, trainingState }) {
+const headerRowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '12px',
+  flexWrap: 'wrap',
+  marginBottom: '12px'
+};
+
+function HyperparameterGrid({ agentType, trainingState, onLoadConfig }) {
   return (
     <>
       {/* Show PPO form when PPO is selected */}
       {agentType === 'PPO' && (
         <Card style={{ marginBottom: '12px' }}>
-          <div className="control-title">PPO Hyperparameters (Stock)</div>
-          <div className="hyperparam-inline" style={{ gridTemplateColumns: 'repeat(7, 1fr)' }}>
+          <div style={headerRowStyle}>
+            <div className="control-title">PPO Hyperparameters (Stock)</div>
+            {onLoadConfig && (
+              <ConfigManager agentType="PPO" onLoadConfig={onLoadConfig} compact />
+            )}
+          </div>
+          <div className="hyperparam-inline">
             <ParamItem label="Symbol">
               <input 
                 type="text" 
@@ -110,8 +125,13 @@ function HyperparameterGrid({ agentType, trainingState }) {
       {/* Show SAC form when SAC is selected */}
       {agentType === 'SAC' && (
         <Card style={{ marginBottom: '12px' }}>
-          <div className="control-title">SAC Hyperparameters (ETF)</div>
-          <div className="hyperparam-inline" style={{ gridTemplateColumns: 'repeat(7, 1fr)' }}>
+          <div style={headerRowStyle}>
+            <div className="control-title">SAC Hyperparameters (ETF)</div>
+            {onLoadConfig && (
+              <ConfigManager agentType="SAC" onLoadConfig={onLoadConfig} compact />
+            )}
+          </div>
+          <div className="hyperparam-inline">
             <ParamItem label="Symbol">
               <input 
                 type="text" 
@@ -189,7 +209,7 @@ function HyperparameterGrid({ agentType, trainingState }) {
       {/* Training Settings - Date Range, Commission, Optuna Trials */}
       <Card style={{ marginBottom: '12px' }}>
         <div className="control-title">Training Settings</div>
-        <div className="hyperparam-inline" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
+        <div className="hyperparam-inline">
           <ParamItem label="Start Date">
             <input 
               type="date" 

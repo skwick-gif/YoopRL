@@ -497,7 +497,7 @@ def train_agent(config) -> dict:
         
         for k, v in config_dict['features'].items():
             # Skip agent history features (not in market data)
-            if k in ['recent_actions', 'performance', 'position_history', 'reward_history', 'llm']:
+            if k in ['recent_actions', 'performance', 'position_history', 'reward_history']:
                 continue
             
             if isinstance(v, bool) and v:
@@ -513,7 +513,20 @@ def train_agent(config) -> dict:
                     feature_names.extend(tech_cols)
                 elif k in available_columns:
                     feature_names.append(k)
+                else:
+                    keyword = k.replace('_', '').lower()
+                    matches = [col for col in available_columns if keyword in col.replace('_', '').lower()]
+                    feature_names.extend(matches)
             elif isinstance(v, dict):
+                if k == 'multi_asset':
+                    if v.get('enabled'):
+                        symbols = v.get('symbols') or []
+                        if not symbols:
+                            symbols = ['SPY', 'QQQ', 'TLT', 'GLD']
+                        lookup = [s.lower() for s in symbols]
+                        multi_cols = [col for col in available_columns if any(sym in col.lower() for sym in lookup)]
+                        feature_names.extend(multi_cols)
+                    continue
                 # Complex feature with parameters (technical indicators)
                 if k == 'technical':
                     # Technical dict with specific indicators
@@ -538,9 +551,15 @@ def train_agent(config) -> dict:
                                 stoch_cols = [col for col in available_columns if col.startswith('stochastic_')]
                                 feature_names.extend(stoch_cols)
                 elif v.get('enabled', False):
-                    # Other enabled dict features
-                    if k in available_columns:
+                    if k == 'llm':
+                        llm_cols = [col for col in available_columns if 'llm' in col.lower()]
+                        feature_names.extend(llm_cols)
+                    elif k in available_columns:
                         feature_names.append(k)
+                    else:
+                        keyword = k.replace('_', '').lower()
+                        matches = [col for col in available_columns if keyword in col.replace('_', '').lower()]
+                        feature_names.extend(matches)
         
         # Remove duplicates while preserving order
         feature_names = list(dict.fromkeys(feature_names))
@@ -566,6 +585,8 @@ def train_agent(config) -> dict:
         if initial_capital is None:
             initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
         commission = config_dict['training_settings'].get('commission', 1.0)
+        max_position_size = config_dict['training_settings'].get('max_position_size', 1.0)
+        normalize_obs = config_dict['training_settings'].get('normalize_obs', True)
         history_config = _extract_history_config(config_dict.get('features', {}))
         
         if config_dict['agent_type'].upper() == 'PPO':
@@ -573,6 +594,9 @@ def train_agent(config) -> dict:
                 df=train_data,
                 initial_capital=initial_capital,
                 commission=commission,
+                max_position_size=max_position_size,
+                risk_penalty=hyperparams.get('risk_penalty', -0.5),
+                normalize_obs=normalize_obs,
                 history_config=history_config
             )
             print(f"[OK] StockTradingEnv created (PPO-optimized)")
@@ -582,6 +606,10 @@ def train_agent(config) -> dict:
                 df=train_data,
                 initial_capital=initial_capital,
                 commission=commission,
+                max_position_size=max_position_size,
+                vol_penalty=hyperparams.get('vol_penalty', -0.3),
+                leverage_factor=hyperparams.get('leverage_factor', 3.0),
+                normalize_obs=normalize_obs,
                 history_config=history_config
             )
             print(f"[OK] ETFTradingEnv created (SAC-optimized)")
@@ -703,6 +731,9 @@ def train_agent(config) -> dict:
                 df=test_data,
                 initial_capital=initial_capital,
                 commission=commission,
+                max_position_size=max_position_size,
+                risk_penalty=hyperparams.get('risk_penalty', -0.5),
+                normalize_obs=normalize_obs,
                 history_config=history_config
             )
         else:
@@ -710,6 +741,10 @@ def train_agent(config) -> dict:
                 df=test_data,
                 initial_capital=initial_capital,
                 commission=commission,
+                max_position_size=max_position_size,
+                vol_penalty=hyperparams.get('vol_penalty', -0.3),
+                leverage_factor=hyperparams.get('leverage_factor', 3.0),
+                normalize_obs=normalize_obs,
                 history_config=history_config
             )
         

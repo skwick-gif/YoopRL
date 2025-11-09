@@ -1,53 +1,34 @@
 /**
  * ConfigManager.jsx
- * Training Configuration Management Component
- * 
+ * Quick preset selector for training configurations
+ *
  * Purpose:
- * - Save and load training configurations
- * - Provide preset configurations (Conservative, Aggressive, Balanced)
- * - Dynamic presets based on agent type (PPO for stocks, SAC for ETFs)
- * - Export/import configurations as JSON files
- * 
- * Why separate file:
- * - Focused component for config management
- * - Reusable across different training contexts
- * - Separates config I/O from training logic
- * - Easy to extend with more presets or validation
- * 
- * Features:
- * - Save current config with custom name
- * - Load previously saved configs
- * - Quick-select presets optimized for different strategies AND agent types
- * - Export config as downloadable JSON
- * - Import config from JSON file
- * 
+ * - Provide curated presets tailored to PPO (stocks) and SAC (leveraged ETFs)
+ * - Notify parent component when a preset is applied
+ *
  * Props:
- * - currentConfig: Current training configuration object
- * - onLoadConfig: Callback when config is loaded (applies to state)
- * - agentType: 'PPO' or 'SAC' - determines which presets to show
- * 
- * Wiring:
- * - Calls trainingAPI.saveConfig() to persist configs
- * - Calls trainingAPI.loadConfig() to retrieve saved configs
- * - Parent (TabTraining) applies loaded config to useTrainingState
+ * - onLoadConfig: callback that receives the selected preset config
+ * - agentType: active agent type ('PPO' | 'SAC')
  */
 
-import React, { useState, useEffect } from 'react';
-import { saveConfig, loadConfig } from '../../services/trainingAPI';
+import React, { useState, useRef, useEffect } from 'react';
 
-const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
-  const [savedConfigs, setSavedConfigs] = useState([]);
-  const [configName, setConfigName] = useState('');
-  const [selectedConfig, setSelectedConfig] = useState('');
+const todayIso = () => new Date().toISOString().split('T')[0];
+
+const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
   const [message, setMessage] = useState({ text: '', type: '' });
+  const timeoutRef = useRef(null);
 
   // Preset configurations - different for PPO (stocks) and SAC (ETFs)
+  const defaultEndDate = todayIso();
+
   const presets = {
     PPO: {
       Conservative: {
         name: 'Conservative (Stock)',
         description: 'Low risk, stable returns for stocks',
         config: {
+          name: 'Conservative (Stock)',
           agent_type: 'PPO',
           hyperparameters: {
             learning_rate: 0.0001,
@@ -56,7 +37,38 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             n_steps: 2048,
             ent_coef: 0.01,
             clip_range: 0.2,
-            episodes: 60000
+            episodes: 60000,
+            risk_penalty: -0.8
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 14 },
+            macd: { enabled: true, params: '12,26,9' },
+            ema: { enabled: true, periods: '10,50' },
+            vix: true,
+            bollinger: { enabled: false, params: '20,2' },
+            stochastic: { enabled: false, params: '14,3' },
+            sentiment: false,
+            social_media: false,
+            news_headlines: false,
+            market_events: false,
+            fundamental: false,
+            multi_asset: { enabled: false, symbols: ['SPY', 'QQQ', 'TLT', 'GLD'] },
+            macro: false,
+            recent_actions: true,
+            performance: { enabled: true, period: '60d' },
+            position_history: true,
+            reward_history: false,
+            llm: { enabled: false, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2018-01-01',
+            end_date: defaultEndDate,
+            commission: 1.0,
+            optuna_trials: 120,
+            max_position_size: 0.7
           }
         }
       },
@@ -64,6 +76,7 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
         name: 'Aggressive (Stock)',
         description: 'Higher risk, faster learning for stocks',
         config: {
+          name: 'Aggressive (Stock)',
           agent_type: 'PPO',
           hyperparameters: {
             learning_rate: 0.0005,
@@ -72,7 +85,38 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             n_steps: 1024,
             ent_coef: 0.05,
             clip_range: 0.3,
-            episodes: 40000
+            episodes: 40000,
+            risk_penalty: -0.25
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 9 },
+            macd: { enabled: true, params: '8,21,5' },
+            ema: { enabled: true, periods: '5,20,50' },
+            vix: true,
+            bollinger: { enabled: true, params: '20,2' },
+            stochastic: { enabled: true, params: '14,3' },
+            sentiment: false,
+            social_media: false,
+            news_headlines: false,
+            market_events: false,
+            fundamental: false,
+            multi_asset: { enabled: false, symbols: ['SPY', 'QQQ', 'TLT', 'GLD'] },
+            macro: false,
+            recent_actions: true,
+            performance: { enabled: true, period: '30d' },
+            position_history: true,
+            reward_history: true,
+            llm: { enabled: false, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2020-01-01',
+            end_date: defaultEndDate,
+            commission: 0.5,
+            optuna_trials: 80,
+            max_position_size: 1.0
           }
         }
       },
@@ -80,6 +124,7 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
         name: 'Balanced (Stock)',
         description: 'Moderate risk-return for stocks',
         config: {
+          name: 'Balanced (Stock)',
           agent_type: 'PPO',
           hyperparameters: {
             learning_rate: 0.0003,
@@ -88,7 +133,38 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             n_steps: 2048,
             ent_coef: 0.02,
             clip_range: 0.2,
-            episodes: 50000
+            episodes: 50000,
+            risk_penalty: -0.5
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 14 },
+            macd: { enabled: true, params: '12,26,9' },
+            ema: { enabled: true, periods: '10,50' },
+            vix: true,
+            bollinger: { enabled: true, params: '20,2' },
+            stochastic: { enabled: false, params: '14,3' },
+            sentiment: false,
+            social_media: false,
+            news_headlines: false,
+            market_events: false,
+            fundamental: false,
+            multi_asset: { enabled: false, symbols: ['SPY', 'QQQ', 'TLT', 'GLD'] },
+            macro: false,
+            recent_actions: true,
+            performance: { enabled: true, period: '45d' },
+            position_history: true,
+            reward_history: false,
+            llm: { enabled: false, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2019-01-01',
+            end_date: defaultEndDate,
+            commission: 0.75,
+            optuna_trials: 100,
+            max_position_size: 0.85
           }
         }
       }
@@ -98,6 +174,7 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
         name: 'Conservative (ETF)',
         description: 'Low risk, stable returns for leveraged ETFs',
         config: {
+          name: 'Conservative (ETF)',
           agent_type: 'SAC',
           hyperparameters: {
             learning_rate: 0.0001,
@@ -106,7 +183,39 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             tau: 0.005,
             ent_coef: 0.1,
             buffer_size: 100000,
-            episodes: 60000
+            episodes: 60000,
+            vol_penalty: -0.45,
+            leverage_factor: 2.0
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 14 },
+            macd: { enabled: true, params: '12,26,9' },
+            ema: { enabled: true, periods: '10,50' },
+            vix: true,
+            bollinger: { enabled: true, params: '20,2' },
+            stochastic: { enabled: true, params: '14,3' },
+            sentiment: true,
+            social_media: true,
+            news_headlines: true,
+            market_events: true,
+            fundamental: false,
+            multi_asset: { enabled: true, symbols: ['SPY', 'QQQ', 'TLT'] },
+            macro: true,
+            recent_actions: true,
+            performance: { enabled: true, period: '30d' },
+            position_history: true,
+            reward_history: true,
+            llm: { enabled: false, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2020-01-01',
+            end_date: defaultEndDate,
+            commission: 1.2,
+            optuna_trials: 120,
+            max_position_size: 0.7
           }
         }
       },
@@ -114,6 +223,7 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
         name: 'Aggressive (ETF)',
         description: 'High risk, high reward for leveraged ETFs',
         config: {
+          name: 'Aggressive (ETF)',
           agent_type: 'SAC',
           hyperparameters: {
             learning_rate: 0.0005,
@@ -122,7 +232,39 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             tau: 0.01,
             ent_coef: 0.3,
             buffer_size: 50000,
-            episodes: 40000
+            episodes: 40000,
+            vol_penalty: -0.2,
+            leverage_factor: 3.0
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 9 },
+            macd: { enabled: true, params: '8,21,5' },
+            ema: { enabled: true, periods: '5,20,50' },
+            vix: true,
+            bollinger: { enabled: true, params: '20,2' },
+            stochastic: { enabled: true, params: '10,3' },
+            sentiment: true,
+            social_media: true,
+            news_headlines: true,
+            market_events: true,
+            fundamental: true,
+            multi_asset: { enabled: true, symbols: ['SPY', 'QQQ', 'IWM', 'TLT', 'GLD'] },
+            macro: true,
+            recent_actions: { enabled: true, length: 10 },
+            performance: { enabled: true, period: '21d' },
+            position_history: { enabled: true, length: 10 },
+            reward_history: true,
+            llm: { enabled: true, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2021-01-01',
+            end_date: defaultEndDate,
+            commission: 1.5,
+            optuna_trials: 90,
+            max_position_size: 1.0
           }
         }
       },
@@ -130,6 +272,7 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
         name: 'Balanced (ETF)',
         description: 'Moderate risk-return for leveraged ETFs',
         config: {
+          name: 'Balanced (ETF)',
           agent_type: 'SAC',
           hyperparameters: {
             learning_rate: 0.0003,
@@ -138,7 +281,39 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
             tau: 0.005,
             ent_coef: 0.2,
             buffer_size: 100000,
-            episodes: 50000
+            episodes: 50000,
+            vol_penalty: -0.3,
+            leverage_factor: 2.5
+          },
+          features: {
+            price: true,
+            volume: true,
+            ohlc: true,
+            rsi: { enabled: true, period: 14 },
+            macd: { enabled: true, params: '12,26,9' },
+            ema: { enabled: true, periods: '10,50' },
+            vix: true,
+            bollinger: { enabled: true, params: '20,2' },
+            stochastic: { enabled: true, params: '14,3' },
+            sentiment: true,
+            social_media: true,
+            news_headlines: true,
+            market_events: true,
+            fundamental: false,
+            multi_asset: { enabled: true, symbols: ['SPY', 'QQQ', 'TLT', 'GLD'] },
+            macro: true,
+            recent_actions: true,
+            performance: { enabled: true, period: '28d' },
+            position_history: true,
+            reward_history: true,
+            llm: { enabled: false, provider: 'Perplexity API' }
+          },
+          training_settings: {
+            start_date: '2020-06-01',
+            end_date: defaultEndDate,
+            commission: 1.25,
+            optuna_trials: 110,
+            max_position_size: 0.85
           }
         }
       }
@@ -148,44 +323,22 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
   // Get presets for current agent type
   const currentPresets = presets[agentType] || presets.PPO;
 
-  // Show message with auto-hide
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
+
   const showMessage = (text, type) => {
     setMessage({ text, type });
-    setTimeout(() => setMessage({ text: '', type: '' }), 3000);
-  };
-
-  // Save current configuration
-  const handleSaveConfig = async () => {
-    if (!configName.trim()) {
-      showMessage('Please enter a configuration name', 'error');
-      return;
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
     }
-
-    const result = await saveConfig(currentConfig, configName);
-    if (result.success) {
-      showMessage('Configuration saved successfully!', 'success');
-      setConfigName('');
-      // Refresh saved configs list (in real app, fetch from API)
-      setSavedConfigs([...savedConfigs, configName]);
-    } else {
-      showMessage(`Failed to save: ${result.error}`, 'error');
-    }
-  };
-
-  // Load saved configuration
-  const handleLoadConfig = async () => {
-    if (!selectedConfig) {
-      showMessage('Please select a configuration', 'error');
-      return;
-    }
-
-    const result = await loadConfig(selectedConfig);
-    if (result.success) {
-      onLoadConfig(result.config);
-      showMessage('Configuration loaded successfully!', 'success');
-    } else {
-      showMessage(`Failed to load: ${result.error}`, 'error');
-    }
+    timeoutRef.current = setTimeout(() => {
+      setMessage({ text: '', type: '' });
+    }, 3000);
   };
 
   // Load preset configuration
@@ -197,280 +350,95 @@ const ConfigManager = ({ currentConfig, onLoadConfig, agentType }) => {
     }
   };
 
-  // Export config as JSON file
-  const handleExportConfig = () => {
-    const dataStr = JSON.stringify(currentConfig, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `training_config_${Date.now()}.json`;
-    link.click();
-    
-    URL.revokeObjectURL(url);
-    showMessage('Configuration exported!', 'success');
-  };
-
-  // Import config from JSON file
-  const handleImportConfig = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const config = JSON.parse(e.target.result);
-        onLoadConfig(config);
-        showMessage('Configuration imported successfully!', 'success');
-      } catch (error) {
-        showMessage('Invalid JSON file', 'error');
-      }
-    };
-    reader.readAsText(file);
-  };
+  const containerStyle = compact ? styles.toolbarCompact : styles.toolbar;
+  const labelStyle = compact ? styles.labelCompact : styles.label;
 
   return (
-    <div style={styles.container}>
-      <h3 style={styles.title}>⚙️ Configuration Manager</h3>
-
-      {/* Message Display */}
+    <div style={containerStyle}>
+      <span style={labelStyle}>
+        Quick Presets {agentType && `(${agentType === 'PPO' ? 'Stock' : 'ETF'})`}
+      </span>
+      <div style={styles.buttonRow}>
+        {Object.entries(currentPresets).map(([key, preset]) => (
+          <button
+            key={key}
+            style={styles.presetButton}
+            onClick={() => handleLoadPreset(key)}
+            onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#45a049'}
+            onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#4CAF50'}
+          >
+            {preset.name}
+          </button>
+        ))}
+      </div>
       {message.text && (
-        <div style={{
-          ...styles.message,
-          backgroundColor: message.type === 'success' ? '#4CAF50' : '#ff6b6b'
-        }}>
+        <div
+          style={{
+            ...styles.inlineMessage,
+            color: message.type === 'success' ? '#4CAF50' : '#ff6b6b'
+          }}
+        >
           {message.text}
         </div>
       )}
-
-      {/* Preset Configurations */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>
-          Quick Presets {agentType && `(${agentType} - ${agentType === 'PPO' ? 'Stocks' : 'Leveraged ETFs'})`}
-        </h4>
-        <div style={styles.presetsGrid}>
-          {Object.entries(currentPresets).map(([key, preset]) => (
-            <div key={key} style={styles.presetCard}>
-              <h5 style={styles.presetName}>{preset.name}</h5>
-              <p style={styles.presetDescription}>{preset.description}</p>
-              <button
-                style={styles.presetButton}
-                onClick={() => handleLoadPreset(key)}
-                onMouseOver={(e) => e.target.style.backgroundColor = '#45a049'}
-                onMouseOut={(e) => e.target.style.backgroundColor = '#4CAF50'}
-              >
-                Load Preset
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Save Configuration */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>Save Current Configuration</h4>
-        <div style={styles.saveRow}>
-          <input
-            type="text"
-            placeholder="Enter configuration name..."
-            value={configName}
-            onChange={(e) => setConfigName(e.target.value)}
-            style={styles.input}
-          />
-          <button
-            style={styles.button}
-            onClick={handleSaveConfig}
-          >
-            💾 Save
-          </button>
-        </div>
-      </div>
-
-      {/* Load Saved Configuration */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>Load Saved Configuration</h4>
-        <div style={styles.loadRow}>
-          <select
-            value={selectedConfig}
-            onChange={(e) => setSelectedConfig(e.target.value)}
-            style={styles.select}
-          >
-            <option value="">-- Select Saved Config --</option>
-            {savedConfigs.map((name, index) => (
-              <option key={index} value={name}>{name}</option>
-            ))}
-          </select>
-          <button
-            style={styles.button}
-            onClick={handleLoadConfig}
-          >
-            📂 Load
-          </button>
-        </div>
-      </div>
-
-      {/* Export/Import */}
-      <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>Export / Import</h4>
-        <div style={styles.exportImportRow}>
-          <button
-            style={styles.exportButton}
-            onClick={handleExportConfig}
-          >
-            📥 Export as JSON
-          </button>
-          <label style={styles.importLabel}>
-            📤 Import JSON
-            <input
-              type="file"
-              accept=".json"
-              onChange={handleImportConfig}
-              style={styles.fileInput}
-            />
-          </label>
-        </div>
-      </div>
     </div>
   );
 };
 
-// Inline styles
 const styles = {
-  container: {
-    padding: '20px',
+  toolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexWrap: 'wrap',
+    padding: '12px 16px',
     backgroundColor: '#1e1e1e',
+    border: '1px solid #30363d',
     borderRadius: '8px',
-    marginTop: '20px'
-  },
-  title: {
-    color: '#e0e0e0',
-    marginTop: 0,
-    marginBottom: '20px',
-    fontSize: '18px',
-    fontWeight: 'bold'
-  },
-  message: {
-    padding: '12px',
-    borderRadius: '6px',
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: '20px',
-    textAlign: 'center'
-  },
-  section: {
-    marginBottom: '25px'
-  },
-  sectionTitle: {
-    color: '#4CAF50',
-    fontSize: '14px',
-    fontWeight: 'bold',
     marginBottom: '12px'
   },
-  presetsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '15px'
+  toolbarCompact: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+    padding: '0',
+    marginBottom: '0'
   },
-  presetCard: {
-    padding: '15px',
-    backgroundColor: '#2d2d2d',
-    borderRadius: '6px',
-    border: '1px solid #444'
+  label: {
+    color: '#c9d1d9',
+    fontWeight: 'bold',
+    fontSize: '13px'
   },
-  presetName: {
-    color: '#e0e0e0',
-    marginTop: 0,
-    marginBottom: '8px',
-    fontSize: '16px'
-  },
-  presetDescription: {
-    color: '#888',
+  labelCompact: {
+    color: '#8b949e',
+    fontWeight: 600,
     fontSize: '12px',
-    marginBottom: '12px'
-  },
-  presetButton: {
-    width: '100%',
-    padding: '8px',
-    backgroundColor: '#4CAF50',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    fontSize: '13px',
-    fontWeight: 'bold',
-    cursor: 'pointer',
-    transition: 'background-color 0.3s'
-  },
-  saveRow: {
-    display: 'flex',
-    gap: '10px'
-  },
-  loadRow: {
-    display: 'flex',
-    gap: '10px'
-  },
-  input: {
-    flex: 1,
-    padding: '10px',
-    backgroundColor: '#2d2d2d',
-    color: '#e0e0e0',
-    border: '1px solid #444',
-    borderRadius: '4px',
-    fontSize: '14px'
-  },
-  select: {
-    flex: 1,
-    padding: '10px',
-    backgroundColor: '#2d2d2d',
-    color: '#e0e0e0',
-    border: '1px solid #444',
-    borderRadius: '4px',
-    fontSize: '14px',
-    cursor: 'pointer'
-  },
-  button: {
-    padding: '10px 20px',
-    backgroundColor: '#2196F3',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    fontSize: '14px',
-    fontWeight: 'bold',
-    cursor: 'pointer',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
     whiteSpace: 'nowrap'
   },
-  exportImportRow: {
+  buttonRow: {
     display: 'flex',
-    gap: '15px'
+    gap: '8px',
+    flexWrap: 'wrap'
   },
-  exportButton: {
-    flex: 1,
-    padding: '12px',
+  presetButton: {
+    padding: '6px 14px',
     backgroundColor: '#4CAF50',
     color: 'white',
     border: 'none',
-    borderRadius: '4px',
-    fontSize: '14px',
-    fontWeight: 'bold',
-    cursor: 'pointer'
-  },
-  importLabel: {
-    flex: 1,
-    padding: '12px',
-    backgroundColor: '#FF9800',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    fontSize: '14px',
-    fontWeight: 'bold',
-    textAlign: 'center',
+    borderRadius: '20px',
+    fontSize: '12px',
+    fontWeight: 600,
     cursor: 'pointer',
-    display: 'flex',
-    justifyContent: 'center',
-    alignItems: 'center'
+    transition: 'background-color 0.25s ease-in-out'
   },
-  fileInput: {
-    display: 'none'
+  inlineMessage: {
+    flexBasis: '100%',
+    fontSize: '12px',
+    fontWeight: 600,
+    marginTop: '4px'
   }
 };
 

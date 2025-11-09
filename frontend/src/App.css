@@ -660,13 +660,17 @@ input:checked + .slider:before {
 /* Hyperparameters Inline Grid */
 .hyperparam-inline {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, max-content));
+    gap: 10px;
     font-size: 11px;
+    justify-content: flex-start;
+    align-items: flex-start;
 }
 
 .hyperparam-inline .param-item {
-    padding: 8px;
+    padding: 6px;
+    max-width: 180px;
+    justify-self: start;
 }
 
 .hyperparam-inline .param-label {
@@ -674,7 +678,8 @@ input:checked + .slider:before {
 }
 
 .hyperparam-inline .param-input {
-    padding: 5px;
+    padding: 4px 6px;
+    max-width: 140px;
 }
 
 /* Agent Chart Container */

@@ -6,7 +6,7 @@ function TabSimulation() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedModel, setSelectedModel] = useState('PPO_AAPL_v3.2');
   const [simulationMode, setSimulationMode] = useState('backtest'); // 'backtest' or 'live'
-  const [showResults, setShowResults] = useState(false); // Toggle results panel
+  const [simulationResults, setSimulationResults] = useState(null);
 
   // Available trained models (will be loaded from backend)
   const availableModels = [
@@ -20,7 +20,7 @@ function TabSimulation() {
   const currentModel = availableModels.find(m => m.id === selectedModel);
 
   // Mock backtest results (will come from API)
-  const backtestResults = {
+  const mockResults = {
     total_return: 34.2,
     sharpe_ratio: 1.82,
     sortino_ratio: 2.15,
@@ -40,8 +40,8 @@ function TabSimulation() {
   };
 
   const handleRunBacktest = () => {
-    setShowResults(true);
-    // Will call API here
+    setSimulationResults(mockResults);
+    // TODO: replace with real API call when backend endpoint is ready
   };
 
   return (
@@ -368,16 +368,16 @@ function TabSimulation() {
                 4. Start Simulation → Agent trades on INTC using AAPL-trained model
                 5. Watch BUY/SELL decisions + Equity curve
               - Perfect for testing model generalization and performance */}
-          <Button className="start">Start Simulation</Button>
+          <Button className="start" onClick={handleRunBacktest}>Start Simulation</Button>
           
           {/* Stop Button: Ends simulation and closes positions
               - Final P&L and equity curve displayed
               - Results can be reviewed in Monitoring tab
               - Agent stops making decisions */}
-          <Button className="stop">Stop</Button>
+          <Button className="stop" onClick={() => setSimulationResults(null)}>Stop</Button>
           
           {/* Reset Button: Clears simulation results and resets to initial state */}
-          <Button className="" style={{ background: '#1f2937' }}>Reset</Button>
+          <Button className="" style={{ background: '#1f2937' }} onClick={() => setSimulationResults(null)}>Reset</Button>
         </div>
         
         {/* Simulation Results Summary */}
@@ -386,19 +386,23 @@ function TabSimulation() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '10px', fontSize: '11px' }}>
             <div>
               <div style={{ color: '#6e7681' }}>Total Trades</div>
-              <div style={{ fontSize: '14px', fontWeight: 600 }}>--</div>
+              <div style={{ fontSize: '14px', fontWeight: 600 }}>{simulationResults ? simulationResults.total_trades : '--'}</div>
             </div>
             <div>
               <div style={{ color: '#6e7681' }}>Win Rate</div>
-              <div style={{ fontSize: '14px', fontWeight: 600 }}>--</div>
+              <div style={{ fontSize: '14px', fontWeight: 600 }}>{simulationResults ? `${simulationResults.win_rate.toFixed(1)}%` : '--'}</div>
             </div>
             <div>
               <div style={{ color: '#6e7681' }}>Final P&L</div>
-              <div style={{ fontSize: '14px', fontWeight: 600, color: '#3fb950' }}>--</div>
+              <div style={{ fontSize: '14px', fontWeight: 600, color: simulationResults && simulationResults.total_return < 0 ? '#f85149' : '#3fb950' }}>
+                {simulationResults ? `${simulationResults.total_return.toFixed(1)}%` : '--'}
+              </div>
             </div>
             <div>
               <div style={{ color: '#6e7681' }}>Final Equity</div>
-              <div style={{ fontSize: '14px', fontWeight: 600 }}>$100,000</div>
+              <div style={{ fontSize: '14px', fontWeight: 600 }}>
+                {simulationResults ? `$${simulationResults.final_equity.toLocaleString()}` : '$100,000'}
+              </div>
             </div>
           </div>
           

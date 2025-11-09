@@ -32,9 +32,10 @@ Wiring:
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, ClassVar
 from datetime import datetime
 import json
+from copy import deepcopy
 
 
 @dataclass
@@ -113,6 +114,19 @@ class SACHyperparameters:
         return errors
 
 
+def _deep_merge_dict(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively merge two dictionaries without mutating inputs."""
+    result = deepcopy(base)
+
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+
+    return result
+
+
 @dataclass
 class FeatureConfig:
     """
@@ -130,6 +144,10 @@ class FeatureConfig:
     vix: bool = True
     bollinger: Dict[str, Any] = field(default_factory=lambda: {'enabled': False, 'params': '20,2'})
     stochastic: Dict[str, Any] = field(default_factory=lambda: {'enabled': False, 'params': '14,3'})
+    multi_asset: Dict[str, Any] = field(default_factory=lambda: {
+        'enabled': False,
+        'symbols': ['SPY', 'QQQ', 'TLT', 'GLD']
+    })
     
     # Alternative data
     sentiment: bool = False
@@ -139,13 +157,67 @@ class FeatureConfig:
     fundamental: bool = False
     
     # Agent history
-    recent_actions: bool = True
+    recent_actions: Any = True
     performance: Dict[str, Any] = field(default_factory=lambda: {'enabled': True, 'period': '30d'})
-    position_history: bool = True
-    reward_history: bool = False
+    position_history: Any = True
+    reward_history: Any = False
     
     # LLM integration
     llm: Dict[str, Any] = field(default_factory=lambda: {'enabled': False, 'provider': 'Perplexity API'})
+
+    AGENT_PROFILES: ClassVar[Dict[str, Dict[str, Any]]] = {
+        'PPO': {
+            'bollinger': {'enabled': False},
+            'stochastic': {'enabled': False},
+            'sentiment': False,
+            'social_media': False,
+            'news_headlines': False,
+            'market_events': False,
+            'fundamental': False,
+            'multi_asset': {'enabled': False},
+            'recent_actions': True,
+            'performance': {'enabled': True, 'period': '30d'},
+            'reward_history': False
+        },
+        'SAC': {
+            'bollinger': {'enabled': True, 'params': '20,2'},
+            'stochastic': {'enabled': True, 'params': '14,3'},
+            'sentiment': True,
+            'social_media': True,
+            'news_headlines': True,
+            'market_events': True,
+            'fundamental': False,
+            'multi_asset': {
+                'enabled': True,
+                'symbols': ['SPY', 'QQQ', 'IWM', 'TLT', 'GLD']
+            },
+            'recent_actions': {'enabled': True, 'length': 10},
+            'performance': {'enabled': True, 'period': '14d'},
+            'position_history': {'enabled': True, 'length': 10},
+            'reward_history': {'enabled': True, 'length': 10}
+        }
+    }
+
+    @classmethod
+    def for_agent(cls, agent_type: str, overrides: Optional[Dict[str, Any]] = None) -> 'FeatureConfig':
+        """Create a feature configuration tailored to the requested agent."""
+        base_data = asdict(cls())
+        profile = cls.AGENT_PROFILES.get(agent_type.upper(), {})
+        merged = _deep_merge_dict(base_data, profile)
+
+        if overrides:
+            merged = _deep_merge_dict(merged, overrides)
+
+        return cls(**merged)
+
+    def with_overrides(self, overrides: Dict[str, Any]) -> 'FeatureConfig':
+        """Return a copy of this configuration with overrides applied."""
+        merged = _deep_merge_dict(asdict(self), overrides)
+        return FeatureConfig(**merged)
+
+    def to_payload(self) -> Dict[str, Any]:
+        """Return the configuration as a plain dictionary payload."""
+        return asdict(self)
 
 
 @dataclass
@@ -223,6 +295,19 @@ class TrainingConfig:
             self.ppo_hyperparameters = PPOHyperparameters()
         elif self.agent_type == 'SAC' and self.sac_hyperparameters is None:
             self.sac_hyperparameters = SACHyperparameters()
+
+        # Normalize feature configuration
+        if isinstance(self.features, dict):
+            self.features = FeatureConfig(**self.features)
+        elif self.features is None:
+            self.features = FeatureConfig.for_agent(self.agent_type)
+        elif isinstance(self.features, FeatureConfig):
+            default_features = FeatureConfig()
+            if self.features == default_features:
+                self.features = FeatureConfig.for_agent(self.agent_type)
+        else:
+            # Any unexpected type falls back to agent-specific defaults
+            self.features = FeatureConfig.for_agent(self.agent_type)
     
     def validate(self) -> Dict[str, List[str]]:
         """
@@ -276,7 +361,15 @@ class TrainingConfig:
             data['sac_hyperparameters'] = SACHyperparameters(**data['sac_hyperparameters'])
         
         if 'features' in data:
-            data['features'] = FeatureConfig(**data['features'])
+            features_payload = data['features']
+            if isinstance(features_payload, FeatureConfig):
+                data['features'] = features_payload
+            elif isinstance(features_payload, dict):
+                data['features'] = FeatureConfig(**features_payload)
+            else:
+                data['features'] = FeatureConfig.for_agent(data.get('agent_type', 'PPO'))
+        else:
+            data['features'] = FeatureConfig.for_agent(data.get('agent_type', 'PPO'))
         
         if 'training_settings' in data:
             data['training_settings'] = TrainingSettings(**data['training_settings'])
@@ -300,6 +393,13 @@ def get_conservative_preset(symbol: str, agent_type: str = 'PPO') -> TrainingCon
     Best for: Risk-averse investors, retirement accounts
     """
     if agent_type == 'PPO':
+        features = FeatureConfig.for_agent('PPO').with_overrides({
+            'bollinger': {'enabled': False},
+            'stochastic': {'enabled': False},
+            'recent_actions': {'enabled': True, 'length': 5},
+            'performance': {'enabled': True, 'period': '60d'},
+            'reward_history': False
+        })
         return TrainingConfig(
             agent_type='PPO',
             symbol=symbol,
@@ -310,6 +410,7 @@ def get_conservative_preset(symbol: str, agent_type: str = 'PPO') -> TrainingCon
                 risk_penalty=-0.8,
                 episodes=60000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=0.7,
@@ -317,6 +418,14 @@ def get_conservative_preset(symbol: str, agent_type: str = 'PPO') -> TrainingCon
             )
         )
     else:  # SAC
+        features = FeatureConfig.for_agent('SAC').with_overrides({
+            'bollinger': {'enabled': True, 'params': '30,2'},
+            'stochastic': {'enabled': True, 'params': '21,3'},
+            'sentiment': False,
+            'market_events': False,
+            'multi_asset': {'enabled': True, 'symbols': ['SPY', 'QQQ', 'TLT']},
+            'reward_history': {'enabled': True, 'length': 6}
+        })
         return TrainingConfig(
             agent_type='SAC',
             symbol=symbol,
@@ -325,6 +434,7 @@ def get_conservative_preset(symbol: str, agent_type: str = 'PPO') -> TrainingCon
                 vol_penalty=-0.6,
                 episodes=55000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=0.7,
@@ -341,6 +451,16 @@ def get_aggressive_preset(symbol: str, agent_type: str = 'SAC') -> TrainingConfi
     Best for: Risk-tolerant traders, growth accounts
     """
     if agent_type == 'SAC':
+        features = FeatureConfig.for_agent('SAC').with_overrides({
+            'bollinger': {'enabled': True, 'params': '20,3'},
+            'stochastic': {'enabled': True, 'params': '10,3'},
+            'sentiment': True,
+            'market_events': True,
+            'social_media': True,
+            'multi_asset': {'enabled': True, 'symbols': ['SPY', 'QQQ', 'IWM', 'TLT', 'GLD']},
+            'recent_actions': {'enabled': True, 'length': 12},
+            'reward_history': {'enabled': True, 'length': 12}
+        })
         return TrainingConfig(
             agent_type='SAC',
             symbol=symbol,
@@ -349,6 +469,7 @@ def get_aggressive_preset(symbol: str, agent_type: str = 'SAC') -> TrainingConfi
                 vol_penalty=-0.1,
                 episodes=40000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=1.0,
@@ -356,6 +477,12 @@ def get_aggressive_preset(symbol: str, agent_type: str = 'SAC') -> TrainingConfi
             )
         )
     else:  # PPO
+        features = FeatureConfig.for_agent('PPO').with_overrides({
+            'bollinger': {'enabled': True, 'params': '20,2'},
+            'stochastic': {'enabled': True, 'params': '14,3'},
+            'recent_actions': {'enabled': True, 'length': 8},
+            'reward_history': {'enabled': True, 'length': 6}
+        })
         return TrainingConfig(
             agent_type='PPO',
             symbol=symbol,
@@ -364,6 +491,7 @@ def get_aggressive_preset(symbol: str, agent_type: str = 'SAC') -> TrainingConfi
                 risk_penalty=-0.2,
                 episodes=40000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=1.0,
@@ -380,6 +508,12 @@ def get_balanced_preset(symbol: str, agent_type: str = 'PPO') -> TrainingConfig:
     Best for: General investors, balanced portfolios
     """
     if agent_type == 'PPO':
+        features = FeatureConfig.for_agent('PPO').with_overrides({
+            'bollinger': {'enabled': True, 'params': '20,2'},
+            'stochastic': {'enabled': False},
+            'recent_actions': {'enabled': True, 'length': 6},
+            'reward_history': {'enabled': True, 'length': 4}
+        })
         return TrainingConfig(
             agent_type='PPO',
             symbol=symbol,
@@ -390,6 +524,7 @@ def get_balanced_preset(symbol: str, agent_type: str = 'PPO') -> TrainingConfig:
                 risk_penalty=-0.5,
                 episodes=50000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=0.85,
@@ -397,6 +532,14 @@ def get_balanced_preset(symbol: str, agent_type: str = 'PPO') -> TrainingConfig:
             )
         )
     else:  # SAC
+        features = FeatureConfig.for_agent('SAC').with_overrides({
+            'bollinger': {'enabled': True, 'params': '20,2'},
+            'stochastic': {'enabled': True, 'params': '14,3'},
+            'sentiment': True,
+            'market_events': True,
+            'multi_asset': {'enabled': True, 'symbols': ['SPY', 'QQQ', 'IWM']},
+            'reward_history': {'enabled': True, 'length': 8}
+        })
         return TrainingConfig(
             agent_type='SAC',
             symbol=symbol,
@@ -405,6 +548,7 @@ def get_balanced_preset(symbol: str, agent_type: str = 'PPO') -> TrainingConfig:
                 vol_penalty=-0.3,
                 episodes=45000
             ),
+            features=features,
             training_settings=TrainingSettings(
                 commission=1.0,
                 max_position_size=0.85,

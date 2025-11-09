@@ -11,7 +11,7 @@
  * 4. Start training with Optuna hyperparameter optimization
  * 5. Monitor progress and view results
  * 6. Run backtesting and check for data drift
- * 7. Save/load configurations and trained models
+ * 7. Load quick presets and manage trained models
  * 
  * Phase 1 Updates:
  * - Integrated useTrainingState hook for centralized state management
@@ -19,7 +19,7 @@
  * - Added ModelSelector for loading trained models
  * - Added BacktestResults for performance metrics
  * - Added DriftAlert for data drift warnings
- * - Added ConfigManager for saving/loading configurations
+ * - Added quick preset toolbar integrated with hyperparameters
  * 
  * State Management:
  * - All training state now managed via useTrainingState hook
@@ -36,7 +36,6 @@ import TrainingProgress from './training/TrainingProgress';
 import ModelSelector from './training/ModelSelector';
 import BacktestResults from './training/BacktestResults';
 import DriftAlert from './training/DriftAlert';
-import ConfigManager from './training/ConfigManager';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
 import { useTrainingState } from '../hooks/useTrainingState';
 import { startTraining, checkDriftStatus, runBacktest } from '../services/trainingAPI';
@@ -489,29 +488,312 @@ function TabTraining() {
     }
   };
 
-  // Handle config load from ConfigManager
+  const resolveFlag = (value) => {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value === 'object') {
+      if (Object.prototype.hasOwnProperty.call(value, 'enabled')) {
+        return Boolean(value.enabled);
+      }
+      return true;
+    }
+    return Boolean(value);
+  };
+
+  const toFiniteNumber = (value) => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : undefined;
+  };
+
+  const toInteger = (value) => {
+    const num = Number.parseInt(value, 10);
+    return Number.isNaN(num) ? undefined : num;
+  };
+
+  const toSymbolString = (symbols) => {
+    if (Array.isArray(symbols)) {
+      return symbols.join(',');
+    }
+    if (typeof symbols === 'string') {
+      return symbols;
+    }
+    return undefined;
+  };
+
+  const applyConfigToState = (configPayload) => {
+    if (!configPayload) {
+      return;
+    }
+
+    const targetAgent = (configPayload.agent_type || selectedAgent || 'PPO').toUpperCase();
+    const agentKey = targetAgent === 'SAC' ? 'SAC' : 'PPO';
+
+    if (configPayload.symbol) {
+      if (agentKey === 'PPO') {
+        trainingState.setPpoSymbol(configPayload.symbol);
+      } else {
+        trainingState.setSacSymbol(configPayload.symbol);
+      }
+    }
+
+    const hyper = configPayload.hyperparameters
+      || (agentKey === 'PPO' ? configPayload.ppo_hyperparameters : configPayload.sac_hyperparameters)
+      || {};
+
+    if (agentKey === 'PPO') {
+      const lr = toFiniteNumber(hyper.learning_rate);
+      if (lr !== undefined) trainingState.setPpoLearningRate(lr);
+
+      const gamma = toFiniteNumber(hyper.gamma);
+      if (gamma !== undefined) trainingState.setPpoGamma(gamma);
+
+      const batch = toInteger(hyper.batch_size);
+      if (batch !== undefined) trainingState.setPpoBatchSize(batch);
+
+      const risk = toFiniteNumber(hyper.risk_penalty);
+      if (risk !== undefined) trainingState.setPpoRiskPenalty(risk);
+
+      const episodes = toInteger(hyper.episodes);
+      if (episodes !== undefined) trainingState.setPpoEpisodes(episodes);
+    } else {
+      const lr = toFiniteNumber(hyper.learning_rate);
+      if (lr !== undefined) trainingState.setSacLearningRate(lr);
+
+      const entropy = toFiniteNumber(hyper.entropy_coef);
+      if (entropy !== undefined) trainingState.setSacEntropy(entropy);
+
+      const batch = toInteger(hyper.batch_size);
+      if (batch !== undefined) trainingState.setSacBatchSize(batch);
+
+      const vol = toFiniteNumber(hyper.vol_penalty);
+      if (vol !== undefined) trainingState.setSacVolPenalty(vol);
+
+      const episodes = toInteger(hyper.episodes);
+      if (episodes !== undefined) trainingState.setSacEpisodes(episodes);
+    }
+
+    const features = configPayload.features || {};
+
+    if (Object.prototype.hasOwnProperty.call(features, 'ohlc')) {
+      trainingState.setOhlcEnabled(Boolean(features.ohlc));
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'rsi')) {
+      const rsiCfg = features.rsi;
+      const enabled = resolveFlag(rsiCfg);
+      if (enabled !== undefined) trainingState.setRsiEnabled(enabled);
+      if (rsiCfg && typeof rsiCfg === 'object' && rsiCfg.period !== undefined) {
+        const period = toInteger(rsiCfg.period);
+        if (period !== undefined) trainingState.setRsiPeriod(period);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'macd')) {
+      const macdCfg = features.macd;
+      const enabled = resolveFlag(macdCfg);
+      if (enabled !== undefined) trainingState.setMacdEnabled(enabled);
+      if (macdCfg && typeof macdCfg === 'object' && macdCfg.params) {
+        trainingState.setMacdParams(String(macdCfg.params));
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'ema')) {
+      const emaCfg = features.ema;
+      const enabled = resolveFlag(emaCfg);
+      if (enabled !== undefined) trainingState.setEmaEnabled(enabled);
+      if (emaCfg && typeof emaCfg === 'object' && emaCfg.periods) {
+        trainingState.setEmaPeriods(String(emaCfg.periods));
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'vix')) {
+      const enabled = resolveFlag(features.vix);
+      if (enabled !== undefined) trainingState.setVixEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'bollinger')) {
+      const bollingerCfg = features.bollinger;
+      const enabled = resolveFlag(bollingerCfg);
+      if (enabled !== undefined) trainingState.setBollingerEnabled(enabled);
+      if (bollingerCfg && typeof bollingerCfg === 'object' && bollingerCfg.params) {
+        trainingState.setBollingerParams(String(bollingerCfg.params));
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'stochastic')) {
+      const stochCfg = features.stochastic;
+      const enabled = resolveFlag(stochCfg);
+      if (enabled !== undefined) trainingState.setStochasticEnabled(enabled);
+      if (stochCfg && typeof stochCfg === 'object' && stochCfg.params) {
+        trainingState.setStochasticParams(String(stochCfg.params));
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'sentiment')) {
+      const enabled = resolveFlag(features.sentiment);
+      if (enabled !== undefined) trainingState.setSentimentEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'social_media')) {
+      const enabled = resolveFlag(features.social_media);
+      if (enabled !== undefined) trainingState.setSocialMediaEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'news_headlines')) {
+      const enabled = resolveFlag(features.news_headlines);
+      if (enabled !== undefined) trainingState.setNewsHeadlinesEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'market_events')) {
+      const enabled = resolveFlag(features.market_events);
+      if (enabled !== undefined) trainingState.setMarketEventsEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'fundamental')) {
+      const enabled = resolveFlag(features.fundamental);
+      if (enabled !== undefined) trainingState.setFundamentalEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'multi_asset')) {
+      const multiAssetCfg = features.multi_asset;
+      const enabled = resolveFlag(multiAssetCfg);
+      if (enabled !== undefined) trainingState.setMultiAssetEnabled(enabled);
+      if (multiAssetCfg && typeof multiAssetCfg === 'object' && multiAssetCfg.symbols !== undefined) {
+        const symbols = toSymbolString(multiAssetCfg.symbols);
+        if (symbols !== undefined) trainingState.setMultiAssetSymbols(symbols);
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'macro')) {
+      const enabled = resolveFlag(features.macro);
+      if (enabled !== undefined) trainingState.setMacroEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'recent_actions')) {
+      const enabled = resolveFlag(features.recent_actions);
+      if (enabled !== undefined) trainingState.setRecentActionsEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'performance')) {
+      const perfCfg = features.performance;
+      const enabled = resolveFlag(perfCfg);
+      if (enabled !== undefined) trainingState.setPerformanceEnabled(enabled);
+      if (perfCfg && typeof perfCfg === 'object' && perfCfg.period) {
+        trainingState.setPerformancePeriod(String(perfCfg.period));
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'position_history')) {
+      const enabled = resolveFlag(features.position_history);
+      if (enabled !== undefined) trainingState.setPositionHistoryEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'reward_history')) {
+      const enabled = resolveFlag(features.reward_history);
+      if (enabled !== undefined) trainingState.setRewardHistoryEnabled(enabled);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(features, 'llm')) {
+      const llmCfg = features.llm;
+      const enabled = resolveFlag(llmCfg);
+      if (enabled !== undefined) trainingState.setLlmEnabled(enabled);
+      if (llmCfg && typeof llmCfg === 'object' && llmCfg.provider) {
+        trainingState.setSelectedLLM(String(llmCfg.provider));
+      }
+    }
+
+    const trainingSettings = configPayload.training_settings || {};
+
+    if (trainingSettings.start_date) {
+      trainingState.setStartDate(trainingSettings.start_date);
+    }
+
+    if (trainingSettings.end_date) {
+      trainingState.setEndDate(trainingSettings.end_date);
+    }
+
+    if (trainingSettings.commission !== undefined) {
+      const commissionValue = toFiniteNumber(trainingSettings.commission);
+      if (commissionValue !== undefined) trainingState.setCommission(commissionValue);
+    }
+
+    if (trainingSettings.optuna_trials !== undefined) {
+      const trials = toInteger(trainingSettings.optuna_trials);
+      if (trials !== undefined) trainingState.setOptunaTrials(trials);
+    }
+
+    if (trainingSettings.initial_capital !== undefined) {
+      const capital = toFiniteNumber(trainingSettings.initial_capital);
+      if (capital !== undefined) {
+        if (agentKey === 'PPO') {
+          trainingState.setPpoInitialCapital(capital);
+        } else {
+          trainingState.setSacInitialCapital(capital);
+        }
+      }
+    }
+
+    if (trainingSettings.max_position_size !== undefined) {
+      const rawSize = toFiniteNumber(trainingSettings.max_position_size);
+      if (rawSize !== undefined) {
+        const pct = rawSize > 1 ? rawSize : rawSize * 100;
+        const capped = Math.max(0, Math.min(100, Math.round(pct)));
+        if (agentKey === 'PPO') {
+          trainingState.setPpoMaxPosition(capped);
+        } else {
+          trainingState.setSacMaxPosition(capped);
+        }
+      }
+    }
+  };
+
+  // Handle config load from quick preset toolbar
   const handleLoadConfig = (config) => {
-    // Apply loaded config to state
-    // This would require updating the hook or manually setting all state values
-    console.log('Loading config:', config);
-    
-    // Extract values from config
-    const configType = config.name || config.agent_type || 'Unknown';
-    const lr = config.hyperparameters?.learning_rate || 'N/A';
-    const gamma = config.hyperparameters?.gamma || 'N/A';
-    const batch = config.hyperparameters?.batch_size || 'N/A';
-    const episodes = config.hyperparameters?.episodes || 'N/A';
-    
-    // Non-blocking success message with clean formatting
-    const message = `✅ Preset Loaded Successfully!\n\n` +
-                   `📋 Type: ${configType}\n` +
-                   `📊 Learning Rate: ${lr}\n` +
-                   `🎯 Gamma: ${gamma}\n` +
-                   `📦 Batch Size: ${batch}\n` +
-                   `🔄 Episodes: ${episodes}`;
-    setDownloadMessage(message);
-    
-    // Auto-hide message after 10 seconds
+    if (!config) {
+      return;
+    }
+
+    const targetAgent = (config.agent_type || selectedAgent || 'PPO').toUpperCase();
+    if (targetAgent !== selectedAgent) {
+      setSelectedAgent(targetAgent);
+    }
+
+    applyConfigToState(config);
+
+    const hyper = config.hyperparameters
+      || (targetAgent === 'SAC' ? config.sac_hyperparameters : config.ppo_hyperparameters)
+      || {};
+
+    const lr = hyper.learning_rate !== undefined ? hyper.learning_rate : 'unchanged';
+    const episodes = hyper.episodes !== undefined ? hyper.episodes : 'unchanged';
+    const rewardKey = targetAgent === 'SAC' ? 'vol_penalty' : 'risk_penalty';
+    const rewardVal = hyper[rewardKey] !== undefined ? hyper[rewardKey] : 'unchanged';
+
+    const features = config.features || {};
+    const featureHighlights = [];
+
+    if (features.sentiment !== undefined) {
+      featureHighlights.push(`Sentiment ${resolveFlag(features.sentiment) ? 'ON' : 'OFF'}`);
+    }
+
+    if (features.multi_asset !== undefined) {
+      featureHighlights.push(`Multi-asset ${resolveFlag(features.multi_asset) ? 'ON' : 'OFF'}`);
+    }
+
+    if (features.reward_history !== undefined) {
+      featureHighlights.push(`Reward history ${resolveFlag(features.reward_history) ? 'ON' : 'OFF'}`);
+    }
+
+    if (features.performance && typeof features.performance === 'object' && features.performance.period) {
+      featureHighlights.push(`Perf window ${features.performance.period}`);
+    }
+
+    const title = config.name || `${targetAgent} configuration`;
+    const baseSummary = `✅ ${title} applied → LR: ${lr}, Episodes: ${episodes}, ${rewardKey}: ${rewardVal}`;
+    const featureSummary = featureHighlights.length ? ` | ${featureHighlights.join(' | ')}` : '';
+
+    setDownloadMessage(baseSummary + featureSummary);
     setTimeout(() => setDownloadMessage(''), 10000);
   };
 
@@ -586,29 +868,151 @@ function TabTraining() {
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{
-                    h1: ({node, ...props}) => <h1 style={{ color: '#4a9eff', fontSize: '32px', marginTop: '0', marginBottom: '16px', borderBottom: '2px solid #4a9eff', paddingBottom: '8px' }} {...props} />,
-                    h2: ({node, ...props}) => <h2 style={{ color: '#5fb3f6', fontSize: '26px', marginTop: '32px', marginBottom: '12px', borderBottom: '1px solid #444', paddingBottom: '6px' }} {...props} />,
-                    h3: ({node, ...props}) => <h3 style={{ color: '#7cc5f8', fontSize: '22px', marginTop: '24px', marginBottom: '10px' }} {...props} />,
-                    h4: ({node, ...props}) => <h4 style={{ color: '#9dd5fa', fontSize: '18px', marginTop: '20px', marginBottom: '8px' }} {...props} />,
-                    p: ({node, ...props}) => <p style={{ marginBottom: '12px', fontSize: '14px' }} {...props} />,
-                    ul: ({node, ...props}) => <ul style={{ marginLeft: '20px', marginBottom: '12px' }} {...props} />,
-                    ol: ({node, ...props}) => <ol style={{ marginLeft: '20px', marginBottom: '12px' }} {...props} />,
-                    li: ({node, ...props}) => <li style={{ marginBottom: '6px', fontSize: '14px' }} {...props} />,
-                    code: ({node, inline, ...props}) => inline 
-                      ? <code style={{ backgroundColor: '#2d2d2d', padding: '2px 6px', borderRadius: '3px', fontSize: '13px', color: '#ce9178' }} {...props} />
-                      : <code style={{ display: 'block', backgroundColor: '#2d2d2d', padding: '12px', borderRadius: '6px', fontSize: '13px', overflowX: 'auto', lineHeight: '1.6', marginBottom: '12px', border: '1px solid #444' }} {...props} />,
-                    pre: ({node, ...props}) => <pre style={{ margin: 0 }} {...props} />,
-                    blockquote: ({node, ...props}) => <blockquote style={{ borderLeft: '4px solid #4a9eff', paddingLeft: '16px', marginLeft: '0', marginBottom: '12px', color: '#aaa', fontStyle: 'italic' }} {...props} />,
-                    table: ({node, ...props}) => <table style={{ borderCollapse: 'collapse', width: '100%', marginBottom: '16px', fontSize: '14px' }} {...props} />,
-                    thead: ({node, ...props}) => <thead style={{ backgroundColor: '#2d2d2d' }} {...props} />,
-                    tbody: ({node, ...props}) => <tbody {...props} />,
-                    tr: ({node, ...props}) => <tr style={{ borderBottom: '1px solid #444' }} {...props} />,
-                    th: ({node, ...props}) => <th style={{ padding: '10px', textAlign: 'left', color: '#4a9eff', fontWeight: 'bold', borderBottom: '2px solid #4a9eff' }} {...props} />,
-                    td: ({node, ...props}) => <td style={{ padding: '10px', borderBottom: '1px solid #444' }} {...props} />,
-                    a: ({node, ...props}) => <a style={{ color: '#4a9eff', textDecoration: 'none', borderBottom: '1px solid transparent' }} onMouseEnter={(e) => e.target.style.borderBottom = '1px solid #4a9eff'} onMouseLeave={(e) => e.target.style.borderBottom = '1px solid transparent'} {...props} />,
-                    hr: ({node, ...props}) => <hr style={{ border: 'none', borderTop: '1px solid #444', margin: '24px 0' }} {...props} />,
-                    strong: ({node, ...props}) => <strong style={{ color: '#fff', fontWeight: 600 }} {...props} />,
-                    em: ({node, ...props}) => <em style={{ color: '#9dd5fa' }} {...props} />
+                    h1: ({node, children, ...rest}) => (
+                      <h1
+                        style={{ color: '#4a9eff', fontSize: '32px', marginTop: '0', marginBottom: '16px', borderBottom: '2px solid #4a9eff', paddingBottom: '8px' }}
+                        {...rest}
+                      >
+                        {children}
+                      </h1>
+                    ),
+                    h2: ({node, children, ...rest}) => (
+                      <h2
+                        style={{ color: '#5fb3f6', fontSize: '26px', marginTop: '32px', marginBottom: '12px', borderBottom: '1px solid #444', paddingBottom: '6px' }}
+                        {...rest}
+                      >
+                        {children}
+                      </h2>
+                    ),
+                    h3: ({node, children, ...rest}) => (
+                      <h3
+                        style={{ color: '#7cc5f8', fontSize: '22px', marginTop: '24px', marginBottom: '10px' }}
+                        {...rest}
+                      >
+                        {children}
+                      </h3>
+                    ),
+                    h4: ({node, children, ...rest}) => (
+                      <h4
+                        style={{ color: '#9dd5fa', fontSize: '18px', marginTop: '20px', marginBottom: '8px' }}
+                        {...rest}
+                      >
+                        {children}
+                      </h4>
+                    ),
+                    p: ({node, children, ...rest}) => (
+                      <p style={{ marginBottom: '12px', fontSize: '14px' }} {...rest}>
+                        {children}
+                      </p>
+                    ),
+                    ul: ({node, children, ...rest}) => (
+                      <ul style={{ marginLeft: '20px', marginBottom: '12px' }} {...rest}>
+                        {children}
+                      </ul>
+                    ),
+                    ol: ({node, children, ...rest}) => (
+                      <ol style={{ marginLeft: '20px', marginBottom: '12px' }} {...rest}>
+                        {children}
+                      </ol>
+                    ),
+                    li: ({node, children, ...rest}) => (
+                      <li style={{ marginBottom: '6px', fontSize: '14px' }} {...rest}>
+                        {children}
+                      </li>
+                    ),
+                    code: ({node, inline, children, ...rest}) => (
+                      inline ? (
+                        <code
+                          style={{ backgroundColor: '#2d2d2d', padding: '2px 6px', borderRadius: '3px', fontSize: '13px', color: '#ce9178' }}
+                          {...rest}
+                        >
+                          {children}
+                        </code>
+                      ) : (
+                        <code
+                          style={{ display: 'block', backgroundColor: '#2d2d2d', padding: '12px', borderRadius: '6px', fontSize: '13px', overflowX: 'auto', lineHeight: '1.6', marginBottom: '12px', border: '1px solid #444' }}
+                          {...rest}
+                        >
+                          {children}
+                        </code>
+                      )
+                    ),
+                    pre: ({node, children, ...rest}) => (
+                      <pre style={{ margin: 0 }} {...rest}>
+                        {children}
+                      </pre>
+                    ),
+                    blockquote: ({node, children, ...rest}) => (
+                      <blockquote
+                        style={{ borderLeft: '4px solid #4a9eff', paddingLeft: '16px', marginLeft: '0', marginBottom: '12px', color: '#aaa', fontStyle: 'italic' }}
+                        {...rest}
+                      >
+                        {children}
+                      </blockquote>
+                    ),
+                    table: ({node, children, ...rest}) => (
+                      <table
+                        style={{ borderCollapse: 'collapse', width: '100%', marginBottom: '16px', fontSize: '14px' }}
+                        {...rest}
+                      >
+                        {children}
+                      </table>
+                    ),
+                    thead: ({node, children, ...rest}) => (
+                      <thead style={{ backgroundColor: '#2d2d2d' }} {...rest}>
+                        {children}
+                      </thead>
+                    ),
+                    tbody: ({node, children, ...rest}) => (
+                      <tbody {...rest}>
+                        {children}
+                      </tbody>
+                    ),
+                    tr: ({node, children, ...rest}) => (
+                      <tr style={{ borderBottom: '1px solid #444' }} {...rest}>
+                        {children}
+                      </tr>
+                    ),
+                    th: ({node, children, ...rest}) => (
+                      <th
+                        style={{ padding: '10px', textAlign: 'left', color: '#4a9eff', fontWeight: 'bold', borderBottom: '2px solid #4a9eff' }}
+                        {...rest}
+                      >
+                        {children}
+                      </th>
+                    ),
+                    td: ({node, children, ...rest}) => (
+                      <td style={{ padding: '10px', borderBottom: '1px solid #444' }} {...rest}>
+                        {children}
+                      </td>
+                    ),
+                    a: ({node, children, ...rest}) => (
+                      <a
+                        style={{ color: '#4a9eff', textDecoration: 'none', borderBottom: '1px solid transparent' }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderBottom = '1px solid #4a9eff';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderBottom = '1px solid transparent';
+                        }}
+                        {...rest}
+                      >
+                        {children}
+                      </a>
+                    ),
+                    hr: ({node, ...rest}) => (
+                      <hr style={{ border: 'none', borderTop: '1px solid #444', margin: '24px 0' }} {...rest} />
+                    ),
+                    strong: ({node, children, ...rest}) => (
+                      <strong style={{ color: '#fff', fontWeight: 600 }} {...rest}>
+                        {children}
+                      </strong>
+                    ),
+                    em: ({node, children, ...rest}) => (
+                      <em style={{ color: '#9dd5fa' }} {...rest}>
+                        {children}
+                      </em>
+                    )
                   }}
                 >
                   {helpContent}
@@ -718,20 +1122,6 @@ function TabTraining() {
         </button>
       </div>
 
-      {/* Current Model Version Info */}
-      <div className="model-version">
-        <strong>Current Models:</strong><br />
-        PPO: v3.2_20241105 | Trained: 05/11/2024 | Episodes: 50,000<br />
-        SAC: v2.8_20241105 | Trained: 05/11/2024 | Episodes: 45,000
-      </div>
-
-      {/* Model Selector */}
-      <ModelSelector 
-        key={selectedAgent}
-        onModelSelect={handleModelSelect}
-        agentType={selectedAgent}
-      />
-
       {/* Drift Alert (shows only if drift detected) */}
       <DriftAlert 
         driftData={driftData}
@@ -742,18 +1132,12 @@ function TabTraining() {
       <HyperparameterGrid 
         agentType={selectedAgent}
         trainingState={trainingState}
+        onLoadConfig={handleLoadConfig}
       />
 
       {/* Feature Selection */}
       <FeatureSelection 
         trainingState={trainingState}
-      />
-
-      {/* Configuration Manager */}
-      <ConfigManager 
-        currentConfig={trainingState.buildTrainingConfig(selectedAgent)}
-        onLoadConfig={handleLoadConfig}
-        agentType={selectedAgent}
       />
 
       {/* Training Controls and Progress */}
@@ -767,6 +1151,13 @@ function TabTraining() {
         trainingId={trainingId}
         handleDownloadData={handleDownloadData}
         handleStartTraining={handleStartTraining}
+      />
+
+      {/* Model Selector */}
+      <ModelSelector 
+        key={selectedAgent}
+        onModelSelect={handleModelSelect}
+        agentType={selectedAgent}
       />
 
       {/* Backtest Results */}
