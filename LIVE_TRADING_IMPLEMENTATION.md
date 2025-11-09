@@ -78,7 +78,9 @@ metadata = {
         'time_frame': 'daily',  # or '5min', '15min', '1hour'
         'bar_size': '1 day',    # IBKR format
         'trading_hours': 'RTH', # Regular Trading Hours
-        'check_frequency': 'EOD' # End-of-Day or 'REALTIME'
+    'check_frequency': 'EOD', # End-of-Day or 'REALTIME'
+    'feature_pipeline_version': 'stock_env_v1',  # ← Load matching normalizer + feature order
+    'normalizer_path': 'backend/models/normalizer_INTC_PPO.json'
     },
     
     # ... rest of metadata
@@ -135,6 +137,7 @@ Training Tab → Train Model → See Results → Click "Deploy to Live Trading"
    │ Time Frame: [Daily ▼]                 │
    │   ☑ EOD (End-of-Day)                 │
    │   ☐ Intraday (5-min bars)            │
+  │ Feature Pipeline: stock_env_v1       │
    │                                        │
    │ [Cancel]  [Deploy & Start Trading]   │
    └────────────────────────────────────────┘
@@ -323,6 +326,9 @@ class LiveTrader:
                 self.model = SAC.load(self.model_path)
             else:
                 raise ValueError(f"Unknown agent type: {self.agent_type}")
+
+      normalizer_path = self.config['trading_config'].get('normalizer_path')
+      self.normalizer = StateNormalizer.load_params(normalizer_path) if normalizer_path else None
             
             self.logger.info(f"Model loaded: {self.model_path}")
             return True
@@ -385,6 +391,9 @@ class LiveTrader:
             
             # Return only latest row
             latest_row = df_features.iloc[[-1]].copy()
+
+      if self.normalizer is not None:
+        latest_row[self.normalizer.feature_names] = self.normalizer.transform(latest_row[self.normalizer.feature_names].values)
             self.logger.info(f"Latest data fetched for {self.symbol}: {latest_row.index[0]}")
             
             return latest_row
@@ -1416,18 +1425,21 @@ else:
 - [ ] Implement `live_trader.py` (LiveTrader class)
 - [ ] Implement `agent_manager.py` (AgentManager class)
 - [ ] Test locally without IBKR
+- [ ] Persist trade logs & metrics (DB or structured log) for auditing
 
 **Days 3-4**: IBKR Integration
 - [ ] Integrate with InterReactBridgeAdapter
 - [ ] Test connection to IBKR
 - [ ] Test historical data fetch
 - [ ] Test order execution (paper trading first!)
+- [ ] Define fallback when data fetch fails (retry/backoff + alert)
 
 **Days 5-7**: API Endpoints
 - [ ] Add live trading endpoints to `api/main.py`
 - [ ] Test with Postman/curl
 - [ ] Implement error handling
 - [ ] Add logging
+- [ ] Wire alerts/notifications on failure (email/Telegram)
 
 ### Week 2: Frontend UI
 **Days 1-2**: Basic UI

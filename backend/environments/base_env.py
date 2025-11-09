@@ -46,13 +46,21 @@ class BaseTradingEnv(gym.Env, ABC):
     
     metadata = {'render.modes': ['human']}
     
+    DEFAULT_HISTORY_FLAGS = {
+        'recent_actions': True,
+        'performance': True,
+        'position_history': True,
+        'reward_history': False,
+    }
+
     def __init__(
         self,
         df: pd.DataFrame,
         initial_capital: float = 100000.0,
         commission: float = 1.0,
         max_position_size: float = 1.0,
-        normalize_obs: bool = True
+        normalize_obs: bool = True,
+        history_config: Optional[Dict] = None
     ):
         """
         Initialize base trading environment.
@@ -86,7 +94,13 @@ class BaseTradingEnv(gym.Env, ABC):
         # History tracking
         self.action_history = []
         self.portfolio_history = []
+        self.position_history = []
         self.reward_history = []
+        self._prev_holdings = 0
+
+        # History feature configuration
+        self.history_config = history_config or {}
+        self.history_settings = self._build_history_settings()
         
         # Define action space: 0=HOLD, 1=BUY, 2=SELL
         self.action_space = gym.spaces.Discrete(3)
@@ -111,9 +125,21 @@ class BaseTradingEnv(gym.Env, ABC):
         # Count feature columns (exclude 'date' and basic OHLCV if needed)
         n_features = len(self.df.columns)
         n_portfolio_state = 4
-        n_history = 5  # Last 5 actions
-        
-        obs_dim = n_portfolio_state + n_features + n_history
+        history_dim = 0
+
+        if self.history_settings['recent_actions']['enabled']:
+            history_dim += self.history_settings['recent_actions']['length']
+
+        if self.history_settings['performance']['enabled']:
+            history_dim += self.history_settings['performance']['length']
+
+        if self.history_settings['position_history']['enabled']:
+            history_dim += self.history_settings['position_history']['length']
+
+        if self.history_settings['reward_history']['enabled']:
+            history_dim += self.history_settings['reward_history']['length']
+
+        obs_dim = n_portfolio_state + n_features + history_dim
         
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
@@ -121,6 +147,160 @@ class BaseTradingEnv(gym.Env, ABC):
             shape=(obs_dim,),
             dtype=np.float32
         )
+
+    def _history_enabled(self, feature: str) -> bool:
+        """Determine if a history-based feature should be included."""
+        default = self.DEFAULT_HISTORY_FLAGS.get(feature, False)
+        value = self.history_config.get(feature, default)
+
+        if isinstance(value, dict):
+            return value.get('enabled', default)
+
+        if value is None:
+            return default
+
+        return bool(value)
+
+    def _history_length(self, feature: str, default: int) -> int:
+        """Extract desired window length for sequence-based history features."""
+        length = default
+        value = self.history_config.get(feature)
+
+        if isinstance(value, dict):
+            for key in ('length', 'window', 'steps'):
+                if key in value and isinstance(value[key], (int, float)):
+                    length = int(value[key])
+                    break
+        elif isinstance(value, (int, float)):
+            length = int(value)
+
+        return max(1, min(length, 100))
+
+    def _parse_performance_window(self) -> int:
+        """Parse performance window (in steps) from config."""
+        default_window = 30
+        value = self.history_config.get('performance', {})
+
+        if isinstance(value, dict):
+            raw_period = value.get('period')
+        else:
+            raw_period = value
+
+        if isinstance(raw_period, str):
+            digits = ''.join(ch for ch in raw_period if ch.isdigit())
+            if digits:
+                default_window = int(digits)
+        elif isinstance(raw_period, (int, float)) and raw_period > 0:
+            default_window = int(raw_period)
+
+        return max(2, min(default_window, 252))
+
+    def _build_history_settings(self) -> Dict[str, Dict[str, int]]:
+        """Construct normalized history feature configuration."""
+        performance_enabled = self._history_enabled('performance')
+
+        settings = {
+            'recent_actions': {
+                'enabled': self._history_enabled('recent_actions'),
+                'length': self._history_length('recent_actions', 5)
+            },
+            'performance': {
+                'enabled': performance_enabled,
+                'window': self._parse_performance_window() if performance_enabled else 2,
+                'length': 4  # cumulative_return, avg_return, volatility, max_drawdown
+            },
+            'position_history': {
+                'enabled': self._history_enabled('position_history'),
+                'length': self._history_length('position_history', 5)
+            },
+            'reward_history': {
+                'enabled': self._history_enabled('reward_history'),
+                'length': self._history_length('reward_history', 5)
+            }
+        }
+
+        return settings
+
+    def _get_history_features(self) -> np.ndarray:
+        """Assemble history-based features according to configuration."""
+        segments = []
+
+        recent_cfg = self.history_settings['recent_actions']
+        if recent_cfg['enabled']:
+            length = recent_cfg['length']
+            actions = [(a - 1) for a in self.action_history[-length:]]  # Map to [-1, 0, 1]
+            action_segment = np.zeros(length, dtype=np.float32)
+            if actions:
+                action_segment[-len(actions):] = actions
+            segments.append(action_segment)
+
+        perf_cfg = self.history_settings['performance']
+        if perf_cfg['enabled']:
+            performance_metrics = self._compute_performance_metrics(perf_cfg['window'])
+            segments.append(performance_metrics.astype(np.float32))
+
+        position_cfg = self.history_settings['position_history']
+        if position_cfg['enabled']:
+            length = position_cfg['length']
+            positions = self.position_history[-length:]
+            position_segment = np.zeros(length, dtype=np.float32)
+            if positions:
+                position_segment[-len(positions):] = positions
+            segments.append(position_segment)
+
+        reward_cfg = self.history_settings['reward_history']
+        if reward_cfg['enabled']:
+            length = reward_cfg['length']
+            rewards = self.reward_history[-length:]
+            reward_segment = np.zeros(length, dtype=np.float32)
+            if rewards:
+                reward_segment[-len(rewards):] = rewards
+            segments.append(reward_segment)
+
+        if not segments:
+            return np.array([], dtype=np.float32)
+
+        return np.concatenate(segments).astype(np.float32)
+
+    def _compute_performance_metrics(self, window: int) -> np.ndarray:
+        """Compute rolling performance summary metrics."""
+        metrics = np.zeros(self.history_settings['performance']['length'], dtype=np.float32)
+
+        if window <= 1 or len(self.portfolio_history) < 2:
+            return metrics
+
+        sample = self.portfolio_history[-window:]
+        if len(sample) < 2:
+            return metrics
+
+        values = np.array(sample, dtype=np.float32)
+        prev_values = values[:-1]
+        next_values = values[1:]
+
+        # Avoid division by zero
+        prev_values = np.where(prev_values == 0, 1e-8, prev_values)
+        returns = (next_values - prev_values) / prev_values
+
+        if returns.size == 0:
+            return metrics
+
+        cumulative_return = values[-1] / values[0] - 1.0 if values[0] != 0 else 0.0
+        avg_return = returns.mean()
+        volatility = returns.std()
+
+        peak = np.maximum.accumulate(values)
+        peak = np.where(peak == 0, 1e-8, peak)
+        drawdowns = (peak - values) / peak
+        max_drawdown = float(drawdowns.max()) if drawdowns.size > 0 else 0.0
+
+        metrics[:] = [
+            float(cumulative_return),
+            float(avg_return),
+            float(volatility),
+            max_drawdown
+        ]
+
+        return metrics
     
     def reset(self) -> np.ndarray:
         """
@@ -134,9 +314,11 @@ class BaseTradingEnv(gym.Env, ABC):
         self.holdings = 0
         self.total_value = self.initial_capital
         self.position_value = 0
+        self._prev_holdings = 0
         
         self.action_history = []
-        self.portfolio_history = []
+        self.portfolio_history = [self.initial_capital]
+        self.position_history = [0.0]
         self.reward_history = []
         
         # Calculate normalization parameters on first reset
@@ -166,9 +348,14 @@ class BaseTradingEnv(gym.Env, ABC):
             current_price = self.df.loc[self.current_step, 'price']
         else:
             raise ValueError("DataFrame must have either 'close' or 'price' column")
-        
+
+        prev_holdings = self.holdings
+
         # Execute action
         self._execute_action(action, current_price)
+
+        # Track previous holdings for reward shaping
+        self._prev_holdings = prev_holdings
         
         # Update portfolio value
         self.position_value = self.holdings * current_price
@@ -180,6 +367,8 @@ class BaseTradingEnv(gym.Env, ABC):
         # Track history
         self.action_history.append(action)
         self.portfolio_history.append(self.total_value)
+        position_ratio = self.position_value / self.total_value if self.total_value > 0 else 0.0
+        self.position_history.append(position_ratio)
         self.reward_history.append(reward)
         
         # Move to next step
@@ -255,12 +444,13 @@ class BaseTradingEnv(gym.Env, ABC):
         # Market features (from DataFrame)
         market_features = self.df.iloc[self.current_step].values.astype(np.float32)
         
-        # Recent action history (last 5 actions, one-hot encoded)
-        recent_actions = self.action_history[-5:] if len(self.action_history) >= 5 else [0] * 5
-        action_features = np.array(recent_actions, dtype=np.float32)
-        
-        # Concatenate all features
-        obs = np.concatenate([portfolio_state, market_features, action_features])
+        history_features = self._get_history_features()
+
+        components = [portfolio_state, market_features]
+        if history_features.size > 0:
+            components.append(history_features.astype(np.float32))
+
+        obs = np.concatenate(components)
         
         # Normalize if enabled
         if self.normalize_obs and self.obs_mean is not None:
@@ -279,11 +469,11 @@ class BaseTradingEnv(gym.Env, ABC):
             self.current_step = step
             obs = self._get_observation()
             all_obs.append(obs)
-        
+
         all_obs = np.array(all_obs)
         self.obs_mean = np.mean(all_obs, axis=0)
         self.obs_std = np.std(all_obs, axis=0)
-        
+
         self.current_step = 0  # Reset after calculation
     
     @abstractmethod

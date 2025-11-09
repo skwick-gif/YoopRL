@@ -589,6 +589,42 @@ class DatabaseManager:
             raise
         finally:
             conn.close()
+
+    def log_system_event(
+        self,
+        component: str,
+        level: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a system log entry for operational auditing."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            now = datetime.now()
+            timestamp = now.timestamp()
+            cursor.execute(
+                """
+                INSERT INTO system_logs (timestamp, datetime, component, level, message, details_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    now.isoformat(),
+                    component,
+                    level.upper(),
+                    message,
+                    json.dumps(details) if details is not None else None,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:  # pragma: no cover - logging shouldn't break main flow
+            logger.error("Failed to log system event: %s", exc)
+            conn.rollback()
+        finally:
+            conn.close()
     
     def save_market_data(self, symbol: str, df: 'pd.DataFrame'):
         """

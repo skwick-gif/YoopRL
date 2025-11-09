@@ -398,12 +398,17 @@ export const runBacktest = async (backtestRequest) => {
       body: JSON.stringify(backtestRequest)
     });
 
+    const data = await response.json().catch(() => null);
+
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.message || 'Failed to run backtest');
+      const message = data?.error || data?.message || `Failed to run backtest (HTTP ${response.status})`;
+      throw new Error(message);
     }
 
-    const data = await response.json();
+    if (!data) {
+      throw new Error('Failed to parse backtest response');
+    }
+
     return {
       success: true,
       results: data

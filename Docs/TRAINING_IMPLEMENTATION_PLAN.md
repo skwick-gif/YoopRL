@@ -54,6 +54,9 @@ pip install -r requirements.txt
 - **Testing Suite**: Unit tests, Integration tests, E2E tests
 - **Documentation**: README, API docs, Architecture diagram
 - **Final validation**: All modules working together
+- **Automation & Monitoring**: הפעלה מתוזמנת של retraining (cron/service), לוגים מרוכזים, התראות במקרה של כשל
+- **Operational Readiness**: נעילת תלויות (requirements lock / Docker), סקריפט הקמה לסביבה נקייה
+- **Model Telemetry**: שמירת תוצאות eval/backtest בבסיס נתונים או לוג ייעודי לצורך מעקב גרסאות לאורך זמן
 
 ### ❌ מה עדיין חסר:
 1. Training Loop (train.py) - Phase 4

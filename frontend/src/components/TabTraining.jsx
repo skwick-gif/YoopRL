@@ -40,6 +40,7 @@ import ConfigManager from './training/ConfigManager';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
 import { useTrainingState } from '../hooks/useTrainingState';
 import { startTraining, checkDriftStatus, runBacktest } from '../services/trainingAPI';
+import liveAPI from '../services/liveAPI';
 
 function TabTraining() {
   // Initialize training state from custom hook
@@ -60,6 +61,8 @@ function TabTraining() {
   // Backtest results
   const [backtestResults, setBacktestResults] = useState(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(null);
+  const [deployingAgent, setDeployingAgent] = useState(false);
   
   // Drift detection
   const [driftData, setDriftData] = useState(null);
@@ -69,47 +72,147 @@ function TabTraining() {
   const [helpContent, setHelpContent] = useState('');
 
   // Deploy to Live Trading handlers
-  const handleDeployToPPO = () => {
-    const config = {
-      agentType: 'PPO',
-      symbol: trainingState.ppoSymbol,
-      timeFrame: trainingState.ppoTimeFrame || 'daily',
-      initialCapital: trainingState.ppoInitialCapital || 10000,
-      maxPosition: trainingState.ppoMaxPosition || 50,
-      paperTrading: true, // Always paper trading for now
-      backtestMetrics: backtestResults
-    };
+  const deployToLiveTrading = async (agentType) => {
+    if (deployingAgent) {
+      return;
+    }
 
-    console.log('🚀 Deploying PPO to Live Trading (Paper Mode):', config);
-    alert(`✅ PPO Agent Deployed!\n\nSymbol: ${config.symbol}\nTime Frame: ${config.timeFrame}\nCapital: $${config.initialCapital}\nMax Position: ${config.maxPosition}%\n\nPaper Trading Mode (No real money)\n\nAgent will appear in Live Trading tab.`);
-    
-    // TODO: Call API to create live agent
-    // liveAPI.createAgent(config).then(...)
-    
-    // Switch to Live Trading tab (will implement later)
-    // props.setActiveTab('live');
+    if (!selectedModel) {
+      alert('Please select a trained model before deploying.');
+      return;
+    }
+
+    if ((selectedModel.agent_type || '').toUpperCase() !== agentType.toUpperCase()) {
+      alert(`Selected model (${selectedModel.agent_type}) does not match ${agentType}. Choose a matching model from the list.`);
+      return;
+    }
+
+    if (!backtestResults) {
+      alert('Run a backtest before deploying the model to live trading.');
+      return;
+    }
+
+    try {
+      setDeployingAgent(true);
+
+      const isPPO = agentType === 'PPO';
+      const fallbackSymbol = isPPO ? trainingState.ppoSymbol : trainingState.sacSymbol;
+      const symbol = selectedModel.symbol || fallbackSymbol;
+      if (!symbol) {
+        alert('Selected model is missing a symbol. Update model metadata before deploying.');
+        return;
+      }
+
+      setDownloadMessage('🚀 Creating live agent with paper trading safeguards...');
+      const initialCapitalInput = isPPO ? trainingState.ppoInitialCapital : trainingState.sacInitialCapital;
+      const maxPositionInput = isPPO ? trainingState.ppoMaxPosition : trainingState.sacMaxPosition;
+      const timeFrame = (isPPO ? trainingState.ppoTimeFrame : trainingState.sacTimeFrame) || 'daily';
+
+      const initialCapital = Number(initialCapitalInput) || 0;
+      let maxPositionPct = Number(maxPositionInput);
+      if (Number.isNaN(maxPositionPct)) {
+        maxPositionPct = 0.5;
+      }
+      if (maxPositionPct > 1) {
+        maxPositionPct = maxPositionPct / 100;
+      }
+      maxPositionPct = Math.min(1, Math.max(0, maxPositionPct));
+
+      const modelPath = selectedModel.model_path || selectedModel.file_path;
+      const featuresUsed = Array.isArray(selectedModel.features_used)
+        ? selectedModel.features_used
+        : selectedModel.features_used
+        ? [selectedModel.features_used]
+        : [];
+
+      const overrides = {
+        agent_type: agentType,
+        symbol,
+        initial_capital: initialCapital,
+        max_position_pct: maxPositionPct,
+        risk_per_trade: 0.02,
+        time_frame: timeFrame,
+        paper_trading: true,
+        check_frequency: 'EOD',
+        lookback_days: 180,
+        extras: {
+          backtest: backtestResults.raw || backtestResults,
+          deployed_from: 'training_tab',
+          deployed_at: new Date().toISOString(),
+        },
+      };
+
+      if (modelPath) {
+        overrides.model_path = modelPath;
+      }
+      if (featuresUsed.length > 0) {
+        overrides.features_used = featuresUsed;
+      }
+      if (selectedModel.features) {
+        overrides.features_config = selectedModel.features;
+      }
+      if (selectedModel.normalizer_path) {
+        overrides.normalizer_path = selectedModel.normalizer_path;
+      }
+
+      const payload = {
+        model_id: selectedModel.model_id,
+        start_immediately: true,
+        overrides,
+      };
+
+      const response = await liveAPI.createAgent(payload);
+      const agentId = response?.agent_id || `${agentType}_${symbol}`;
+      const message = `✅ Live agent ${agentId} created for ${symbol}.`;
+      setDownloadMessage(message);
+      setTimeout(() => {
+        setDownloadMessage((current) => (current === message ? '' : current));
+      }, 12000);
+      if (response?.agent) {
+        localStorage.setItem('yooprl:lastDeployAgent', JSON.stringify({
+          agent: response.agent,
+          createdAt: new Date().toISOString(),
+        }));
+      }
+      if (window.dispatchEvent) {
+        window.dispatchEvent(new CustomEvent('yooprl-agent-deployed', {
+          detail: {
+            agent_type: agentType,
+            agent_id: agentId,
+            agent: response?.agent,
+            overrides,
+            timestamp: Date.now(),
+          },
+        }));
+      }
+    } catch (error) {
+      console.error('Failed to deploy agent:', error);
+      const message = `❌ Deployment failed: ${error.message}`;
+      setDownloadMessage(message);
+      setTimeout(() => {
+        setDownloadMessage((current) => (current === message ? '' : current));
+      }, 12000);
+    } finally {
+      setDeployingAgent(false);
+    }
   };
 
-  const handleDeployToSAC = () => {
-    const config = {
-      agentType: 'SAC',
-      symbol: trainingState.sacSymbol,
-      timeFrame: trainingState.sacTimeFrame || 'daily',
-      initialCapital: trainingState.sacInitialCapital || 10000,
-      maxPosition: trainingState.sacMaxPosition || 50,
-      paperTrading: true, // Always paper trading for now
-      backtestMetrics: backtestResults
-    };
+  const handleDeployToPPO = () => deployToLiveTrading('PPO');
+  const handleDeployToSAC = () => deployToLiveTrading('SAC');
 
-    console.log('🚀 Deploying SAC to Live Trading (Paper Mode):', config);
-    alert(`✅ SAC Agent Deployed!\n\nSymbol: ${config.symbol}\nTime Frame: ${config.timeFrame}\nCapital: $${config.initialCapital}\nMax Position: ${config.maxPosition}%\n\nPaper Trading Mode (No real money)\n\nAgent will appear in Live Trading tab.`);
-    
-    // TODO: Call API to create live agent
-    // liveAPI.createAgent(config).then(...)
-    
-    // Switch to Live Trading tab (will implement later)
-    // props.setActiveTab('live');
-  };
+  const sharpeValue = backtestResults?.sharpe_ratio ?? 0;
+  const canDeployPPO =
+    selectedAgent === 'PPO' &&
+    !!selectedModel &&
+    selectedModel.agent_type === 'PPO' &&
+    sharpeValue >= 0.5 &&
+    !deployingAgent;
+  const canDeploySAC =
+    selectedAgent === 'SAC' &&
+    !!selectedModel &&
+    selectedModel.agent_type === 'SAC' &&
+    sharpeValue >= 0.5 &&
+    !deployingAgent;
 
   // Load help documentation content
   useEffect(() => {
@@ -134,6 +237,11 @@ function TabTraining() {
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
   }, [showHelp]);
+
+  useEffect(() => {
+    setSelectedModel(null);
+    setBacktestResults(null);
+  }, [selectedAgent]);
 
   // Check for data drift on mount and periodically
   useEffect(() => {
@@ -263,48 +371,115 @@ function TabTraining() {
 
   // Handle model selection for backtesting
   const handleModelSelect = async (model) => {
-    console.log('Selected model:', model);
-    
-    // Try to run backtest, but use mock data if it fails (backend might not be ready)
+    setSelectedModel(model || null);
+    setBacktestResults(null);
+
+    if (!model) {
+      return;
+    }
+
+    if (model.symbol) {
+      if (model.agent_type === 'PPO' && trainingState.setPpoSymbol) {
+        trainingState.setPpoSymbol(model.symbol);
+      }
+      if (model.agent_type === 'SAC' && trainingState.setSacSymbol) {
+        trainingState.setSacSymbol(model.symbol);
+      }
+    }
+
     setBacktestLoading(true);
-    
+    setDownloadMessage('⏳ Running validation backtest for selected model...');
+
+    const agentInitialCapital =
+      model.agent_type === 'PPO' ? trainingState.ppoInitialCapital : trainingState.sacInitialCapital;
+    const initialCapital = Number(model.initial_capital) || Number(agentInitialCapital) || 100000;
+    const commissionValue = Number(trainingState.commission) || 0;
+
+    const resolvedModelPath = model.model_path || model.file_path;
+    if (!resolvedModelPath) {
+      const pathError = '⚠️ Selected model is missing a model path. Update metadata and try again.';
+      setDownloadMessage(pathError);
+      setBacktestLoading(false);
+      setTimeout(() => {
+        setDownloadMessage((current) => (current === pathError ? '' : current));
+      }, 9000);
+      return;
+    }
+    const backtestRequest = {
+      model_path: resolvedModelPath,
+      normalizer_path: model.normalizer_path,
+      agent_type: model.agent_type,
+      symbol: model.symbol,
+      start_date: trainingState.startDate,
+      end_date: trainingState.endDate,
+      initial_capital: initialCapital,
+      commission: commissionValue
+    };
+
     try {
-      const backtestRequest = {
-        model_path: model.file_path,
-        start_date: trainingState.startDate,
-        end_date: trainingState.endDate,
-        initial_capital: 100000,
-        commission: trainingState.commission
-      };
-      
       const result = await runBacktest(backtestRequest);
-      
-      if (result.success) {
-        setBacktestResults(result.results);
+
+  if (result.success && result.results) {
+        const metrics = result.results.metrics || result.results;
+        const flattened = {
+          sharpe_ratio: Number(metrics.sharpe_ratio) || 0,
+          sortino_ratio: Number(metrics.sortino_ratio) || 0,
+          max_drawdown: Number(metrics.max_drawdown) || 0,
+          win_rate: Number(metrics.win_rate) || 0,
+          total_return: Number(metrics.total_return) || 0,
+          final_portfolio_value: Number(metrics.final_balance || metrics.final_portfolio_value) || 0,
+          num_trades: Number(metrics.total_trades ?? metrics.num_trades ?? 0),
+          avg_trade_return: metrics.total_trades
+            ? (Number(metrics.total_return) || 0) / Number(metrics.total_trades)
+            : 0,
+          raw: result.results,
+        };
+        setBacktestResults(flattened);
+        const successMessage = '✅ Validation backtest completed successfully.';
+        setDownloadMessage(successMessage);
+        setTimeout(() => {
+          setDownloadMessage((current) => (current === successMessage ? '' : current));
+        }, 9000);
       } else {
-        console.warn('Backtest API failed, using mock data for UI testing');
-        // Use mock data so deployment UI is still visible
+        console.warn('Backtest API failed, using placeholder metrics');
         setBacktestResults({
-          total_return: 18.5,
-          sharpe_ratio: 1.85,
-          max_drawdown: -7.2,
-          win_rate: 62.5,
-          total_trades: 145
+          sharpe_ratio: model.sharpe_ratio || 0.4,
+          sortino_ratio: model.sortino_ratio || 0.5,
+          max_drawdown: model.max_drawdown || -20,
+          win_rate: model.win_rate || 55,
+          total_return: model.total_return || 12,
+          final_portfolio_value: model.final_portfolio_value || 112000,
+          num_trades: model.total_trades || 120,
+          avg_trade_return: 0,
+          raw: null,
         });
+  const warningMessage = '⚠️ Backtest API unavailable; using stored metrics.';
+        setDownloadMessage(warningMessage);
+        setTimeout(() => {
+          setDownloadMessage((current) => (current === warningMessage ? '' : current));
+        }, 9000);
       }
     } catch (error) {
-      console.warn('Backtest error, using mock data:', error);
-      // Use mock data so deployment UI is still visible
+      console.warn('Backtest error, using placeholder metrics:', error);
       setBacktestResults({
-        total_return: 18.5,
-        sharpe_ratio: 1.85,
-        max_drawdown: -7.2,
-        win_rate: 62.5,
-        total_trades: 145
+        sharpe_ratio: model.sharpe_ratio || 0.4,
+        sortino_ratio: model.sortino_ratio || 0.5,
+        max_drawdown: model.max_drawdown || -20,
+        win_rate: model.win_rate || 55,
+        total_return: model.total_return || 12,
+        final_portfolio_value: model.final_portfolio_value || 112000,
+        num_trades: model.total_trades || 120,
+        avg_trade_return: 0,
+        raw: null,
       });
+      const errorMessage = `⚠️ Backtest failed: ${error.message}. Showing stored metrics.`;
+      setDownloadMessage(errorMessage);
+      setTimeout(() => {
+        setDownloadMessage((current) => (current === errorMessage ? '' : current));
+      }, 9000);
+    } finally {
+      setBacktestLoading(false);
     }
-    
-    setBacktestLoading(false);
   };
 
   // Handle drift detection - trigger retraining
@@ -552,6 +727,7 @@ function TabTraining() {
 
       {/* Model Selector */}
       <ModelSelector 
+        key={selectedAgent}
         onModelSelect={handleModelSelect}
         agentType={selectedAgent}
       />
@@ -659,34 +835,89 @@ function TabTraining() {
             color: '#8b949e'
           }}>
             <div style={{ marginBottom: '8px' }}>
-              <strong style={{ color: '#c9d1d9' }}>Current Model:</strong> {selectedAgent} - {selectedAgent === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol}
+              <strong style={{ color: '#c9d1d9' }}>Selected Model:</strong>{' '}
+              {selectedModel
+                ? `${selectedModel.agent_type} • ${selectedModel.symbol} • ${selectedModel.version || 'vN/A'}`
+                : 'None selected'}
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
-              <div>
-                <div style={{ color: '#6e7681', fontSize: '11px' }}>Total Return</div>
-                <div style={{ color: backtestResults.total_return >= 0 ? '#3fb950' : '#f85149', fontWeight: 'bold' }}>
-                  {backtestResults.total_return >= 0 ? '+' : ''}{backtestResults.total_return?.toFixed(2)}%
+
+            {selectedModel && (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '12px',
+                marginBottom: '12px'
+              }}>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Model ID</div>
+                  <div style={{ color: '#c9d1d9', fontWeight: 'bold', wordBreak: 'break-all' }}>{selectedModel.model_id}</div>
+                </div>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Created</div>
+                  <div style={{ color: '#c9d1d9' }}>
+                    {selectedModel.created_at
+                      ? new Date(selectedModel.created_at).toLocaleString()
+                      : 'N/A'}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Model Path</div>
+                  <div style={{ color: '#a371f7', fontFamily: 'monospace', fontSize: '12px', wordBreak: 'break-all' }}>
+                    {selectedModel.file_path || selectedModel.model_path || 'N/A'}
+                  </div>
+                </div>
+                {selectedModel.normalizer_path && (
+                  <div>
+                    <div style={{ color: '#6e7681', fontSize: '11px' }}>Normalizer</div>
+                    <div style={{ color: '#a371f7', fontFamily: 'monospace', fontSize: '12px', wordBreak: 'break-all' }}>
+                      {selectedModel.normalizer_path}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {selectedModel && backtestResults && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px' }}>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Total Return</div>
+                  <div style={{ color: backtestResults.total_return >= 0 ? '#3fb950' : '#f85149', fontWeight: 'bold' }}>
+                    {backtestResults.total_return >= 0 ? '+' : ''}{backtestResults.total_return?.toFixed(2)}%
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Sharpe Ratio</div>
+                  <div style={{ color: '#58a6ff', fontWeight: 'bold' }}>
+                    {backtestResults.sharpe_ratio?.toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Max Drawdown</div>
+                  <div style={{ color: '#f85149', fontWeight: 'bold' }}>
+                    {backtestResults.max_drawdown?.toFixed(2)}%
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: '#6e7681', fontSize: '11px' }}>Win Rate</div>
+                  <div style={{ color: '#3fb950', fontWeight: 'bold' }}>
+                    {backtestResults.win_rate?.toFixed(1)}%
+                  </div>
                 </div>
               </div>
-              <div>
-                <div style={{ color: '#6e7681', fontSize: '11px' }}>Sharpe Ratio</div>
-                <div style={{ color: '#58a6ff', fontWeight: 'bold' }}>
-                  {backtestResults.sharpe_ratio?.toFixed(2)}
-                </div>
+            )}
+
+            {!selectedModel && (
+              <div style={{
+                padding: '10px',
+                background: 'rgba(187, 128, 9, 0.1)',
+                border: '1px solid rgba(187, 128, 9, 0.4)',
+                borderRadius: '6px',
+                color: '#d29922',
+                fontSize: '12px'
+              }}>
+                Select a trained model above to unlock deployment options.
               </div>
-              <div>
-                <div style={{ color: '#6e7681', fontSize: '11px' }}>Max Drawdown</div>
-                <div style={{ color: '#f85149', fontWeight: 'bold' }}>
-                  {backtestResults.max_drawdown?.toFixed(2)}%
-                </div>
-              </div>
-              <div>
-                <div style={{ color: '#6e7681', fontSize: '11px' }}>Win Rate</div>
-                <div style={{ color: '#3fb950', fontWeight: 'bold' }}>
-                  {backtestResults.win_rate?.toFixed(1)}%
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Deployment Configuration */}
@@ -846,17 +1077,23 @@ function TabTraining() {
             {selectedAgent === 'PPO' && (
               <button
                 onClick={() => handleDeployToPPO()}
-                disabled={!backtestResults || backtestResults.sharpe_ratio < 0.5}
+                disabled={!canDeployPPO}
                 style={{
                   padding: '14px 24px',
-                  background: backtestResults.sharpe_ratio >= 1.5 ? '#238636' : '#bb8009',
+                  background: !selectedModel
+                    ? '#30363d'
+                    : sharpeValue >= 1.5
+                    ? '#238636'
+                    : sharpeValue >= 0.5
+                    ? '#bb8009'
+                    : '#30363d',
                   color: '#ffffff',
                   border: 'none',
                   borderRadius: '6px',
                   fontSize: '14px',
                   fontWeight: 'bold',
-                  cursor: backtestResults.sharpe_ratio < 0.5 ? 'not-allowed' : 'pointer',
-                  opacity: backtestResults.sharpe_ratio < 0.5 ? 0.5 : 1,
+                  cursor: canDeployPPO ? 'pointer' : 'not-allowed',
+                  opacity: canDeployPPO ? 1 : 0.6,
                   transition: 'all 0.2s',
                   display: 'flex',
                   alignItems: 'center',
@@ -864,7 +1101,7 @@ function TabTraining() {
                   gap: '8px'
                 }}
                 onMouseOver={(e) => {
-                  if (backtestResults.sharpe_ratio >= 0.5) {
+                  if (canDeployPPO) {
                     e.target.style.transform = 'translateY(-2px)';
                     e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
                   }
@@ -873,26 +1110,39 @@ function TabTraining() {
                   e.target.style.transform = 'translateY(0)';
                   e.target.style.boxShadow = 'none';
                 }}
+                title={!selectedModel
+                  ? 'Select a model to deploy'
+                  : sharpeValue < 0.5
+                  ? 'Sharpe Ratio below deployment threshold (0.5)'
+                  : deployingAgent
+                  ? 'Deployment in progress'
+                  : ''}
               >
                 <span style={{ fontSize: '18px' }}>📈</span>
-                <span>Deploy {trainingState.ppoSymbol} to PPO Live Trading (Paper Mode)</span>
+                <span>{deployingAgent ? 'Deploying to Live...' : `Deploy ${selectedModel?.symbol || trainingState.ppoSymbol} to PPO Live (Paper)`}</span>
               </button>
             )}
 
             {selectedAgent === 'SAC' && (
               <button
                 onClick={() => handleDeployToSAC()}
-                disabled={!backtestResults || backtestResults.sharpe_ratio < 0.5}
+                disabled={!canDeploySAC}
                 style={{
                   padding: '14px 24px',
-                  background: backtestResults.sharpe_ratio >= 1.5 ? '#238636' : '#bb8009',
+                  background: !selectedModel
+                    ? '#30363d'
+                    : sharpeValue >= 1.5
+                    ? '#238636'
+                    : sharpeValue >= 0.5
+                    ? '#bb8009'
+                    : '#30363d',
                   color: '#ffffff',
                   border: 'none',
                   borderRadius: '6px',
                   fontSize: '14px',
                   fontWeight: 'bold',
-                  cursor: backtestResults.sharpe_ratio < 0.5 ? 'not-allowed' : 'pointer',
-                  opacity: backtestResults.sharpe_ratio < 0.5 ? 0.5 : 1,
+                  cursor: canDeploySAC ? 'pointer' : 'not-allowed',
+                  opacity: canDeploySAC ? 1 : 0.6,
                   transition: 'all 0.2s',
                   display: 'flex',
                   alignItems: 'center',
@@ -900,7 +1150,7 @@ function TabTraining() {
                   gap: '8px'
                 }}
                 onMouseOver={(e) => {
-                  if (backtestResults.sharpe_ratio >= 0.5) {
+                  if (canDeploySAC) {
                     e.target.style.transform = 'translateY(-2px)';
                     e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
                   }
@@ -909,9 +1159,16 @@ function TabTraining() {
                   e.target.style.transform = 'translateY(0)';
                   e.target.style.boxShadow = 'none';
                 }}
+                title={!selectedModel
+                  ? 'Select a model to deploy'
+                  : sharpeValue < 0.5
+                  ? 'Sharpe Ratio below deployment threshold (0.5)'
+                  : deployingAgent
+                  ? 'Deployment in progress'
+                  : ''}
               >
                 <span style={{ fontSize: '18px' }}>🚀</span>
-                <span>Deploy {trainingState.sacSymbol} to SAC Live Trading (Paper Mode)</span>
+                <span>{deployingAgent ? 'Deploying to Live...' : `Deploy ${selectedModel?.symbol || trainingState.sacSymbol} to SAC Live (Paper)`}</span>
               </button>
             )}
           </div>

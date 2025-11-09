@@ -33,6 +33,7 @@ Wiring:
 
 import numpy as np
 import pandas as pd
+from typing import Optional
 from environments.base_env import BaseTradingEnv
 
 
@@ -51,7 +52,8 @@ class StockTradingEnv(BaseTradingEnv):
         commission: float = 1.0,
         max_position_size: float = 1.0,
         risk_penalty: float = -0.5,
-        normalize_obs: bool = True
+        normalize_obs: bool = True,
+        history_config: Optional[dict] = None
     ):
         """
         Initialize stock trading environment.
@@ -64,7 +66,14 @@ class StockTradingEnv(BaseTradingEnv):
             risk_penalty: Penalty coefficient for volatility (negative)
             normalize_obs: Whether to normalize observations
         """
-        super().__init__(df, initial_capital, commission, max_position_size, normalize_obs)
+        super().__init__(
+            df,
+            initial_capital,
+            commission,
+            max_position_size,
+            normalize_obs,
+            history_config=history_config
+        )
         
         self.risk_penalty = risk_penalty
         
@@ -121,7 +130,45 @@ class StockTradingEnv(BaseTradingEnv):
             if recent_trades > 3:  # More than 3 trades in last 5 steps
                 action_penalty = -0.5
         
-        # 5. Holding reward (encourage staying invested when profitable)
+        # 5. Opportunity cost / market alignment reward
+        market_return = 0.0
+        if self.current_step > 0:
+            if 'returns' in self.df.columns:
+                raw_return = self.df.loc[self.current_step, 'returns']
+                market_return = float(raw_return) if np.isfinite(raw_return) else 0.0
+            else:
+                price_col = 'price' if 'price' in self.df.columns else 'close'
+                prev_price = self.df.loc[self.current_step - 1, price_col]
+                denominator = prev_price if prev_price != 0 else 1e-8
+                market_return = float((current_price - prev_price) / denominator)
+
+        opportunity_reward = 0.0
+        if market_return > 0.0:
+            capped = np.clip(market_return, 0.0, 0.03)
+            if self.holdings > 0:
+                opportunity_reward = capped * 20.0
+            else:
+                opportunity_reward = -capped * 10.0
+        elif market_return < 0.0 and self.holdings > 0:
+            capped = np.clip(abs(market_return), 0.0, 0.03)
+            opportunity_reward = -capped * 20.0
+
+        # 6. Trade incentive / inactivity penalty
+        trade_bonus = 0.0
+        prev_holdings = getattr(self, '_prev_holdings', 0)
+        if action == 1 and prev_holdings == 0 and self.holdings > 0:
+            trade_bonus = 0.3  # Encourage opening new positions when flat
+        elif action == 2 and prev_holdings == 0:
+            trade_bonus = -0.2  # Discourage selling when nothing is held
+
+        trade_penalty = 0.0
+        if action in (1, 2):
+            trade_penalty = -0.02  # light damping of excessive trades
+
+        inactivity_penalty = 0.0
+        if action == 0 and self.holdings == 0:
+            inactivity_penalty = -0.01
+
         holding_reward = 0.0
         if action == 0 and self.holdings > 0 and portfolio_return > 0:
             holding_reward = 0.2  # Small bonus for holding during gains
@@ -132,7 +179,11 @@ class StockTradingEnv(BaseTradingEnv):
             risk_penalty_value +
             drawdown_penalty +
             action_penalty +
-            holding_reward
+            holding_reward +
+            opportunity_reward +
+            trade_bonus +
+            trade_penalty +
+            inactivity_penalty
         )
         
         # Update previous value for next step

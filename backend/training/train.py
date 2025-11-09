@@ -61,6 +61,15 @@ def _resolve_hyperparameters(config_dict: dict) -> dict:
     return merged
 
 
+def _extract_history_config(features: dict) -> dict:
+    """Return only history-related feature flags from the feature payload."""
+    if not isinstance(features, dict):
+        return {}
+
+    history_keys = ['recent_actions', 'performance', 'position_history', 'reward_history']
+    return {key: features[key] for key in history_keys if key in features}
+
+
 class TrainingProgressCallback(BaseCallback):
     """
     Custom callback for logging training progress to JSON file.
@@ -275,6 +284,7 @@ def optimize_hyperparameters_with_optuna(
     if initial_capital is None:
         initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
     commission = config_dict['training_settings'].get('commission', 1.0)
+    history_config = _extract_history_config(config_dict.get('features', {}))
     
     def objective(trial):
         """Optuna objective function - maximize Sharpe ratio on validation set."""
@@ -306,13 +316,15 @@ def optimize_hyperparameters_with_optuna(
                 env = StockTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
-                    commission=commission
+                    commission=commission,
+                    history_config=history_config
                 )
             else:
                 env = ETFTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
-                    commission=commission
+                    commission=commission,
+                    history_config=history_config
                 )
             
             # Create agent with trial hyperparameters
@@ -333,13 +345,15 @@ def optimize_hyperparameters_with_optuna(
                 test_env = StockTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
-                    commission=commission
+                    commission=commission,
+                    history_config=history_config
                 )
             else:
                 test_env = ETFTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
-                    commission=commission
+                    commission=commission,
+                    history_config=history_config
                 )
             
             returns = []
@@ -552,12 +566,14 @@ def train_agent(config) -> dict:
         if initial_capital is None:
             initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
         commission = config_dict['training_settings'].get('commission', 1.0)
+        history_config = _extract_history_config(config_dict.get('features', {}))
         
         if config_dict['agent_type'].upper() == 'PPO':
             env = StockTradingEnv(
                 df=train_data,
                 initial_capital=initial_capital,
-                commission=commission
+                commission=commission,
+                history_config=history_config
             )
             print(f"[OK] StockTradingEnv created (PPO-optimized)")
         
@@ -565,7 +581,8 @@ def train_agent(config) -> dict:
             env = ETFTradingEnv(
                 df=train_data,
                 initial_capital=initial_capital,
-                commission=commission
+                commission=commission,
+                history_config=history_config
             )
             print(f"[OK] ETFTradingEnv created (SAC-optimized)")
         
@@ -685,13 +702,15 @@ def train_agent(config) -> dict:
             test_env = StockTradingEnv(
                 df=test_data,
                 initial_capital=initial_capital,
-                commission=commission
+                commission=commission,
+                history_config=history_config
             )
         else:
             test_env = ETFTradingEnv(
                 df=test_data,
                 initial_capital=initial_capital,
-                commission=commission
+                commission=commission,
+                history_config=history_config
             )
         
         # Run evaluation

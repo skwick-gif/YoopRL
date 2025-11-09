@@ -48,6 +48,50 @@ function TrainingProgress({
 }) {
   const [progressData, setProgressData] = useState(null);
 
+  const resolveMessageStyle = (message) => {
+    if (!message) {
+      return {};
+    }
+
+    if (message.startsWith('✅')) {
+      return {
+        backgroundColor: '#1e4620',
+        border: '1px solid #4CAF50',
+        color: '#4CAF50'
+      };
+    }
+
+    if (message.startsWith('❌')) {
+      return {
+        backgroundColor: '#4d1f1f',
+        border: '1px solid #f44336',
+        color: '#f44336'
+      };
+    }
+
+    if (message.startsWith('⚠️')) {
+      return {
+        backgroundColor: 'rgba(187, 128, 9, 0.12)',
+        border: '1px solid rgba(187, 128, 9, 0.6)',
+        color: '#d29922'
+      };
+    }
+
+    if (message.startsWith('🚀') || message.startsWith('⏳')) {
+      return {
+        backgroundColor: 'rgba(31, 111, 235, 0.12)',
+        border: '1px solid rgba(88, 166, 255, 0.8)',
+        color: '#58a6ff'
+      };
+    }
+
+    return {
+      backgroundColor: '#2d2d2d',
+      border: '1px solid #444',
+      color: '#e0e0e0'
+    };
+  };
+
   // Poll for training progress when training is active
   useEffect(() => {
     if (!isTraining || !trainingId) {
@@ -162,14 +206,12 @@ function TrainingProgress({
             <div style={{
               padding: '12px',
               marginBottom: '10px',
-              backgroundColor: downloadMessage.startsWith('✅') ? '#1e4620' : '#4d1f1f',
-              border: downloadMessage.startsWith('✅') ? '1px solid #4CAF50' : '1px solid #f44336',
               borderRadius: '4px',
-              color: downloadMessage.startsWith('✅') ? '#4CAF50' : '#f44336',
               fontWeight: 600,
               fontSize: '14px',
               animation: 'fadeIn 0.3s ease-in',
-              whiteSpace: 'pre-line'
+              whiteSpace: 'pre-line',
+              ...resolveMessageStyle(downloadMessage)
             }}>
               {downloadMessage}
             </div>

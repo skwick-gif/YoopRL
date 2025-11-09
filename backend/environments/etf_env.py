@@ -39,6 +39,7 @@ Wiring:
 
 import numpy as np
 import pandas as pd
+from typing import Optional
 from environments.base_env import BaseTradingEnv
 
 
@@ -58,7 +59,8 @@ class ETFTradingEnv(BaseTradingEnv):
         max_position_size: float = 1.0,
         vol_penalty: float = -0.3,
         leverage_factor: float = 3.0,
-        normalize_obs: bool = True
+        normalize_obs: bool = True,
+        history_config: Optional[dict] = None
     ):
         """
         Initialize ETF trading environment.
@@ -72,7 +74,14 @@ class ETFTradingEnv(BaseTradingEnv):
             leverage_factor: ETF leverage multiplier (3x for TNA/TQQQ)
             normalize_obs: Whether to normalize observations
         """
-        super().__init__(df, initial_capital, commission, max_position_size, normalize_obs)
+        super().__init__(
+            df,
+            initial_capital,
+            commission,
+            max_position_size,
+            normalize_obs,
+            history_config=history_config
+        )
         
         self.vol_penalty = vol_penalty
         self.leverage_factor = leverage_factor

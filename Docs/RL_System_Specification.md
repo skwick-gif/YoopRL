@@ -268,6 +268,11 @@ To ensure the agent remains effective in changing market conditions, the followi
 4. **Model Versioning**: Save each retrained model as a new version, maintaining a history of previous models for rollback if needed.
 5. **Backtesting**: Evaluate the new model version on historical data to ensure performance improvements or stability.
 6. **Redeployment**: Deploy the validated model to live trading if backtest results meet predefined criteria.
+7. **Operational Hardening**:
+  - **Automation**: schedule retraining jobs (cron/service) with health checks, ensure automatic retries and graceful failure handling.
+  - **Monitoring & Alerts**: centralize logs, emit alerts (email/Telegram) on training/backtest failures or KPI regressions.
+  - **Environment Control**: lock dependencies (requirements.txt lock/Docker) and provide reproducible environment setup scripts.
+  - **Telemetry**: persist evaluation/backtest metrics and deployment decisions in a structured store for auditing and model comparisons.
 # RL Trading System - Specification Document
 
 ## Table of Contents
