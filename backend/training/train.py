@@ -22,6 +22,7 @@ import pandas as pd
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
+import gym
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -34,6 +35,26 @@ from utils.state_normalizer import StateNormalizer
 from models.model_manager import ModelManager
 from config.training_config import TrainingConfig
 from evaluation.backtester import evaluate_trained_model
+
+
+class ContinuousActionAdapter(gym.ActionWrapper):
+    """Map SAC's continuous actions back onto the env's discrete API."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+
+    def action(self, action):
+        value = float(action[0]) if isinstance(action, (list, tuple, np.ndarray)) else float(action)
+        if value <= -0.33:
+            return 2  # SELL
+        if value >= 0.33:
+            return 1  # BUY
+        return 0  # HOLD
+
+    def reverse_action(self, action):
+        mapping = {0: 0.0, 1: 1.0, 2: -1.0}
+        return np.array([mapping.get(int(action), 0.0)], dtype=np.float32)
 
 
 def _resolve_hyperparameters(config_dict: dict) -> dict:
@@ -292,12 +313,12 @@ def optimize_hyperparameters_with_optuna(
         # Sample hyperparameters based on agent type
         if agent_type == 'PPO':
             trial_hyperparams = {
-                'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True),
-                'gamma': trial.suggest_float('gamma', 0.95, 0.999),
-                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512]),
+                'learning_rate': trial.suggest_float('learning_rate', 5e-5, 5e-4, log=True),
+                'gamma': trial.suggest_float('gamma', 0.98, 0.999),
+                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256]),
                 'n_steps': trial.suggest_categorical('n_steps', [1024, 2048, 4096]),
-                'ent_coef': trial.suggest_float('ent_coef', 0.0, 0.1),
-                'clip_range': trial.suggest_float('clip_range', 0.1, 0.3),
+                'ent_coef': trial.suggest_float('ent_coef', 0.0, 0.02),
+                'clip_range': trial.suggest_float('clip_range', 0.1, 0.25),
                 'episodes': base_hyperparams.get('episodes', 10000)  # Keep episodes fixed
             }
         else:  # SAC
@@ -326,6 +347,7 @@ def optimize_hyperparameters_with_optuna(
                     commission=commission,
                     history_config=history_config
                 )
+                env = ContinuousActionAdapter(env)
             
             # Create agent with trial hyperparameters
             agent = create_agent(
@@ -355,8 +377,11 @@ def optimize_hyperparameters_with_optuna(
                     commission=commission,
                     history_config=history_config
                 )
+                test_env = ContinuousActionAdapter(test_env)
             
             returns = []
+            trade_counts = []
+            drawdowns = []
             for episode in range(10):  # 10 evaluation episodes
                 obs = test_env.reset()
                 # Handle tuple return from shimmy wrapper
@@ -364,7 +389,10 @@ def optimize_hyperparameters_with_optuna(
                     obs = obs[0]
                     
                 done = False
-                episode_return = 0
+                episode_trades = 0
+                peak_value = float(initial_capital)
+                episode_max_drawdown = 0.0
+                total_value = float(initial_capital)
                 
                 while not done:
                     prediction = agent.predict(obs, deterministic=True)
@@ -378,18 +406,47 @@ def optimize_hyperparameters_with_optuna(
                         obs, reward, terminated, truncated, info = step_result
                         done = terminated or truncated
                     
-                    episode_return += reward
+                    if action in (1, 2):
+                        episode_trades += 1
+
+                    info_total = None
+                    if isinstance(info, dict):
+                        info_total = info.get('total_value')
+                    if info_total is None:
+                        info_total = getattr(test_env, 'total_value', peak_value)
+                    total_value = float(info_total)
+
+                    if total_value > peak_value:
+                        peak_value = total_value
+                    else:
+                        drawdown = (peak_value - total_value) / (peak_value + 1e-8)
+                        if drawdown > episode_max_drawdown:
+                            episode_max_drawdown = drawdown
                 
+                final_value = total_value
+                episode_return = (final_value - float(initial_capital)) / float(initial_capital)
                 returns.append(episode_return)
+                trade_counts.append(episode_trades)
+                drawdowns.append(episode_max_drawdown)
             
             # Calculate Sharpe ratio (mean return / std return)
             mean_return = np.mean(returns)
             std_return = np.std(returns)
             sharpe_ratio = mean_return / (std_return + 1e-8)
+
+            avg_trades = float(np.mean(trade_counts)) if trade_counts else 0.0
+            if avg_trades < 1.0:
+                sharpe_ratio = -1e6  # Strongly penalize policies that never trade
+
+            avg_drawdown = float(np.mean(drawdowns)) if drawdowns else 0.0
+            if avg_drawdown > 0.25:  # penalize >25% drawdown
+                sharpe_ratio -= (avg_drawdown - 0.25) * 200.0
             
             print(f"   Trial {trial.number}: Sharpe={sharpe_ratio:.3f}, "
                   f"LR={trial_hyperparams['learning_rate']:.6f}, "
-                  f"Gamma={trial_hyperparams['gamma']:.3f}")
+                  f"Gamma={trial_hyperparams['gamma']:.3f}, "
+                  f"AvgTrades={avg_trades:.2f}, "
+                  f"AvgDD={avg_drawdown*100:.2f}%")
             
             return sharpe_ratio
             
@@ -612,6 +669,7 @@ def train_agent(config) -> dict:
                 normalize_obs=normalize_obs,
                 history_config=history_config
             )
+            env = ContinuousActionAdapter(env)
             print(f"[OK] ETFTradingEnv created (SAC-optimized)")
         
         else:
@@ -747,6 +805,7 @@ def train_agent(config) -> dict:
                 normalize_obs=normalize_obs,
                 history_config=history_config
             )
+            test_env = ContinuousActionAdapter(test_env)
         
         # Run evaluation
         try:
