@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,7 @@ try:  # Guard import so unit tests can run without full SB3
 except ImportError as exc:  # pragma: no cover - hard failure if missing
     raise ImportError("stable_baselines3 must be installed for live trading") from exc
 
+from database.db_manager import DatabaseManager
 from data_download.feature_engineering import FeatureEngineering
 from data_download.loader import download_history
 from utils.state_normalizer import StateNormalizer
@@ -119,9 +120,10 @@ class LiveTraderConfig:
 class LiveTrader:
     """Runtime execution engine for a single RL trading agent."""
 
-    def __init__(self, config: LiveTraderConfig):
+    def __init__(self, config: LiveTraderConfig, db_manager: Optional[DatabaseManager] = None):
         self.config = config
         self.logger = logging.getLogger(f"LiveTrader.{config.agent_id}")
+        self.db: Optional[DatabaseManager] = db_manager
 
         self.model: Optional[BaseAlgorithm] = None
         self.normalizer: Optional[StateNormalizer] = None
@@ -191,10 +193,15 @@ class LiveTrader:
         try:
             features, price = self._prepare_latest_observation()
             if features is None:
+                self._persist_risk_event(
+                    event_type="DATA_FETCH_FAILED",
+                    severity="WARNING",
+                    description=f"Missing market data for {self.config.symbol}",
+                )
                 return False
 
             action = self._predict_action(features)
-            self._execute_action(action, price)
+            self._execute_action(action, price, features)
 
             self.last_run_at = datetime.utcnow()
             self.last_action = action
@@ -203,6 +210,11 @@ class LiveTrader:
             return True
         except Exception as exc:  # pylint: disable=broad-except
             self.logger.error("Live check failed: %s", exc, exc_info=True)
+            self._persist_risk_event(
+                event_type="EXECUTION_ERROR",
+                severity="CRITICAL",
+                description=str(exc),
+            )
             return False
 
     def close_position(self) -> bool:
@@ -355,16 +367,20 @@ class LiveTrader:
         action, _ = self.model.predict(observation.reshape(1, -1), deterministic=True)
         return int(action)
 
-    def _execute_action(self, action: int, price: float) -> None:
+    def _execute_action(self, action: int, price: float, features: Optional[np.ndarray] = None) -> None:
         price = max(price, 0.0)
         quantity = self._determine_position_size(price)
 
+        executed_quantity = 0
         if action == 2:
-            self._handle_buy(quantity, price)
+            executed_quantity = self._handle_buy(quantity, price)
         elif action == 0:
-            self._handle_sell(price)
+            executed_quantity = self._handle_sell(price)
         else:
             self.logger.debug("Holding position (%s)", self.config.symbol)
+
+        log_quantity = executed_quantity if action in (0, 2) else 0
+        self._persist_action_event(action, price, log_quantity, features)
 
     def _determine_position_size(self, price: float) -> int:
         if price <= 0:
@@ -374,13 +390,13 @@ class LiveTrader:
         shares = max(0, min(max_shares, risk_shares))
         return shares or (1 if self.current_capital >= price else 0)
 
-    def _handle_buy(self, shares: int, price: float) -> None:
+    def _handle_buy(self, shares: int, price: float) -> int:
         if shares <= 0:
             self.logger.info("Buy signal ignored (no capital available)")
-            return
+            return 0
         if self.current_position > 0:
             self.logger.debug("Already in position, skipping buy")
-            return
+            return 0
 
         cost = shares * price
         self.current_capital -= cost
@@ -392,22 +408,26 @@ class LiveTrader:
         if not self.paper_trading and self.broker:
             self._submit_order("BUY", shares)
 
-    def _handle_sell(self, price: float) -> None:
+        return shares
+
+    def _handle_sell(self, price: float) -> int:
         if self.current_position <= 0:
             self.logger.debug("Sell signal with no position")
-            return
+            return 0
 
-        proceeds = self.current_position * price
-        pnl = (price - self.entry_price) * self.current_position
+        shares = self.current_position
+        proceeds = shares * price
+        pnl = (price - self.entry_price) * shares
         self.current_capital += proceeds
         self.total_pnl += pnl
-        self._log_trade("SELL", self.current_position, price, pnl)
+        self._log_trade("SELL", shares, price, pnl)
 
         if not self.paper_trading and self.broker:
-            self._submit_order("SELL", self.current_position)
+            self._submit_order("SELL", shares)
 
         self.current_position = 0
         self.entry_price = 0.0
+        return shares
 
     def _submit_order(self, action: str, quantity: int) -> None:
         if not self.broker:
@@ -438,6 +458,78 @@ class LiveTrader:
     def _push_equity_snapshot(self, price: float) -> None:
         portfolio_value = self.current_capital + (self.current_position * price)
         self._equity_curve.append((datetime.utcnow(), portfolio_value))
+
+    def _persist_action_event(
+        self,
+        action: int,
+        price: float,
+        quantity: int,
+        state_features: Optional[np.ndarray] = None,
+    ) -> None:
+        if self.db is None:
+            return
+
+        try:
+            self.db.log_agent_action(
+                agent_name=self.config.agent_id,
+                symbol=self.config.symbol,
+                action=ACTION_NAMES.get(action, "UNKNOWN"),
+                quantity=float(quantity),
+                price=float(price),
+                reward=None,
+                rationale=None,
+                confidence=None,
+                state=self._build_state_payload(state_features),
+            )
+        except Exception:  # pragma: no cover - persistence failures should not break trading
+            self.logger.debug(
+                "Failed to persist agent action for %s", self.config.agent_id, exc_info=True
+            )
+
+    def _persist_risk_event(
+        self,
+        event_type: str,
+        severity: str,
+        description: str,
+        *,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+    ) -> None:
+        if self.db is None:
+            return
+
+        try:
+            self.db.log_risk_event(
+                event_type=event_type,
+                severity=severity,
+                description=description,
+                agent_name=self.config.agent_id,
+                symbol=self.config.symbol,
+                value=value,
+                threshold=threshold,
+            )
+        except Exception:  # pragma: no cover
+            self.logger.debug(
+                "Failed to persist risk event for %s", self.config.agent_id, exc_info=True
+            )
+
+    def _build_state_payload(self, features: Optional[np.ndarray]) -> Optional[Dict[str, Any]]:
+        if features is None:
+            return None
+
+        try:
+            values = features.tolist()
+        except AttributeError:
+            values = list(features)
+
+        names = list(self.config.features_used)
+        if len(names) == len(values):
+            return {name: float(values[idx]) for idx, name in enumerate(names)}
+
+        return {
+            "values": [float(val) for val in values],
+            "feature_count": len(values),
+        }
 
     @staticmethod
     def _resolve_period(days: int) -> str:

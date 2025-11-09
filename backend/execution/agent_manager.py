@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, Iterable, Optional, Union
 
+from database.db_manager import DatabaseManager
+
 from .live_trader import LiveTrader, LiveTraderConfig
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,13 @@ class AgentManager:
     def __init__(self) -> None:
         self._agents: Dict[str, LiveTrader] = {}
         self.logger = logging.getLogger(f"{__name__}.AgentManager")
+        self._db: Optional[DatabaseManager] = None
+
+    def attach_database(self, db_manager: DatabaseManager) -> None:
+        """Inject shared persistence layer used for monitoring telemetry."""
+
+        self._db = db_manager
+        self.logger.info("Database manager attached to AgentManager")
 
     # ------------------------------------------------------------------
     # Agent lifecycle helpers
@@ -44,7 +53,7 @@ class AgentManager:
             self.logger.info("Replacing existing agent %s", agent_id)
             self.remove_agent(agent_id)
 
-        trader = LiveTrader(trader_config)
+        trader = LiveTrader(trader_config, db_manager=self._db)
         self._agents[agent_id] = trader
         self.logger.info("Agent %s registered", agent_id)
 

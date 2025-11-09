@@ -936,6 +936,293 @@ class DatabaseManager:
         finally:
             conn.close()
     
+    def log_agent_action(
+        self,
+        agent_name: str,
+        symbol: str,
+        action: str,
+        quantity: float,
+        price: float,
+        reward: Optional[float] = None,
+        rationale: Optional[str] = None,
+        confidence: Optional[float] = None,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a single agent decision for monitoring and audit trails."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            now = datetime.now()
+            cursor.execute(
+                """
+                INSERT INTO agent_actions (
+                    timestamp, datetime, agent_name, symbol, action,
+                    quantity, price, reward, rationale, confidence, state_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now.timestamp(),
+                    now.isoformat(),
+                    agent_name,
+                    symbol,
+                    action,
+                    float(quantity),
+                    float(price),
+                    reward if reward is not None else None,
+                    rationale,
+                    confidence if confidence is not None else None,
+                    json.dumps(state) if state is not None else None,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:  # pragma: no cover - logging should not interrupt flow
+            logger.error("Failed to log agent action: %s", exc)
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def log_risk_event(
+        self,
+        event_type: str,
+        severity: str,
+        description: str,
+        agent_name: Optional[str] = None,
+        symbol: Optional[str] = None,
+        value: Optional[float] = None,
+        threshold: Optional[float] = None,
+        action_taken: Optional[str] = None,
+    ) -> None:
+        """Record a risk alert for alerting and later review."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            now = datetime.now()
+            cursor.execute(
+                """
+                INSERT INTO risk_events (
+                    timestamp, datetime, event_type, severity, agent_name, symbol,
+                    description, value, threshold, action_taken
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now.timestamp(),
+                    now.isoformat(),
+                    event_type,
+                    severity.upper(),
+                    agent_name,
+                    symbol,
+                    description,
+                    value,
+                    threshold,
+                    action_taken,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:  # pragma: no cover
+            logger.error("Failed to log risk event: %s", exc)
+            conn.rollback()
+        finally:
+            conn.close()
+
+    def get_recent_agent_actions(
+        self,
+        limit: int = 50,
+        agent_name: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the most recent agent actions ordered by timestamp descending."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            query = "SELECT * FROM agent_actions WHERE 1=1"
+            params: List[Any] = []
+
+            if agent_name:
+                query += " AND agent_name = ?"
+                params.append(agent_name)
+
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            actions: List[Dict[str, Any]] = []
+            for row in rows:
+                payload = dict(row)
+                state_json = payload.get("state_json")
+                if state_json:
+                    try:
+                        payload["state"] = json.loads(state_json)
+                    except json.JSONDecodeError:
+                        payload["state"] = None
+                payload.pop("state_json", None)
+                actions.append(payload)
+
+            return actions
+        except Exception as exc:
+            logger.error("Error fetching agent actions: %s", exc)
+            raise
+        finally:
+            conn.close()
+
+    def get_recent_risk_events(
+        self,
+        limit: int = 50,
+        severity: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch latest risk events sorted by time descending."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            query = "SELECT * FROM risk_events WHERE 1=1"
+            params: List[Any] = []
+
+            if severity:
+                query += " AND severity = ?"
+                params.append(severity.upper())
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as exc:
+            logger.error("Error fetching risk events: %s", exc)
+            raise
+        finally:
+            conn.close()
+
+    def get_recent_system_logs(
+        self,
+        limit: int = 100,
+        component: Optional[str] = None,
+        level: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve recent system log entries."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            query = "SELECT * FROM system_logs WHERE 1=1"
+            params: List[Any] = []
+
+            if component:
+                query += " AND component = ?"
+                params.append(component)
+
+            if level:
+                query += " AND level = ?"
+                params.append(level.upper())
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            logs: List[Dict[str, Any]] = []
+            for row in rows:
+                entry = dict(row)
+                details = entry.get("details_json")
+                if details:
+                    try:
+                        entry["details"] = json.loads(details)
+                    except json.JSONDecodeError:
+                        entry["details"] = None
+                entry.pop("details_json", None)
+                logs.append(entry)
+
+            return logs
+        except Exception as exc:
+            logger.error("Error fetching system logs: %s", exc)
+            raise
+        finally:
+            conn.close()
+
+    def get_equity_summary(self, hours: int = 24) -> Dict[str, Any]:
+        """Compute aggregate equity metrics for the monitoring dashboard."""
+
+        history = self.get_equity_history(hours=hours)
+        if not history:
+            return {
+                'hours': hours,
+                'has_data': False,
+                'net_liquidation': 0.0,
+                'change_pct': 0.0,
+                'max_drawdown_pct': 0.0,
+                'buying_power': 0.0,
+                'cash': 0.0,
+                'unrealized_pnl': 0.0,
+                'realized_pnl': 0.0,
+                'history': [],
+            }
+
+        latest = history[-1]
+        first = history[0]
+
+        initial_value = float(first.get('net_liquidation') or 0.0)
+        latest_value = float(latest.get('net_liquidation') or 0.0)
+        change_pct = 0.0
+        if initial_value:
+            change_pct = ((latest_value - initial_value) / initial_value) * 100.0
+
+        max_value = None
+        max_drawdown_pct = 0.0
+        for point in history:
+            value = float(point.get('net_liquidation') or 0.0)
+            if value <= 0:
+                continue
+            if max_value is None or value > max_value:
+                max_value = value
+            drawdown = (value - max_value) / max_value if max_value else 0.0
+            if drawdown < max_drawdown_pct:
+                max_drawdown_pct = drawdown
+
+        max_drawdown_pct = abs(max_drawdown_pct * 100.0)
+
+        trimmed_history = history[-200:] if len(history) > 200 else history
+        curve = [
+            {
+                'timestamp': point['timestamp'],
+                'datetime': point['datetime'],
+                'net_liquidation': float(point.get('net_liquidation') or 0.0),
+            }
+            for point in trimmed_history
+        ]
+
+        return {
+            'hours': hours,
+            'has_data': True,
+            'timestamp': latest.get('timestamp'),
+            'datetime': latest.get('datetime'),
+            'net_liquidation': latest_value,
+            'buying_power': float(latest.get('buying_power') or 0.0),
+            'cash': float(latest.get('cash') or 0.0),
+            'unrealized_pnl': float(latest.get('unrealized_pnl') or 0.0),
+            'realized_pnl': float(latest.get('realized_pnl') or 0.0),
+            'gross_position_value': float(latest.get('gross_position_value') or 0.0),
+            'change_pct': change_pct,
+            'max_drawdown_pct': max_drawdown_pct,
+            'history': curve,
+        }
+
     def get_database_stats(self) -> Dict[str, Any]:
         """
         Get database statistics
