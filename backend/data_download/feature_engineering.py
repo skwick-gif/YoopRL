@@ -116,6 +116,15 @@ class FeatureEngineering:
             k_period, d_period = [int(x) for x in params.split(',')]
             logger.info(f"  - Adding Stochastic (K={k_period}, D={d_period})")
             df['stoch_k'], df['stoch_d'] = self._calculate_stochastic(df, k_period, d_period)
+
+        # ADX / DMI
+        if self._is_enabled('adx'):
+            period = int(self.feature_config.get('adx', {}).get('period', 14))
+            logger.info(f"  - Adding ADX/DMI (period={period})")
+            plus_di, minus_di, adx = self._calculate_adx(df, period)
+            df['plus_di'] = plus_di
+            df['minus_di'] = minus_di
+            df['adx'] = adx
         
         # VIX (if requested and available)
         if self._is_enabled('vix'):
@@ -398,6 +407,42 @@ class FeatureEngineering:
         stoch_d = stoch_k.rolling(window=d_period).mean()
         
         return stoch_k, stoch_d
+
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14):
+        """Calculate Average Directional Index (ADX) and directional indicators."""
+
+        high = df['High']
+        low = df['Low']
+        close = df['Close']
+
+        up_move = high.diff()
+        down_move = low.diff() * -1
+
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        tr_components = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1)
+        true_range = tr_components.max(axis=1)
+
+        atr = true_range.rolling(window=period, min_periods=period).mean()
+        atr = atr.replace(0, np.nan)
+
+        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).sum() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).sum() / atr)
+
+        di_sum = (plus_di + minus_di).replace(0, np.nan)
+        dx = (plus_di - minus_di).abs() / di_sum * 100
+        adx = dx.rolling(window=period, min_periods=period).mean()
+
+        plus_di = plus_di.fillna(0.0)
+        minus_di = minus_di.fillna(0.0)
+        adx = adx.fillna(0.0)
+
+        return plus_di, minus_di, adx
     
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
         """Calculate Average True Range"""

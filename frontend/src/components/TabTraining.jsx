@@ -630,6 +630,16 @@ function TabTraining() {
       }
     }
 
+    if (Object.prototype.hasOwnProperty.call(features, 'adx')) {
+      const adxCfg = features.adx;
+      const enabled = resolveFlag(adxCfg);
+      if (enabled !== undefined) trainingState.setAdxEnabled(enabled);
+      if (adxCfg && typeof adxCfg === 'object' && adxCfg.period !== undefined) {
+        const period = toInteger(adxCfg.period);
+        if (period !== undefined) trainingState.setAdxPeriod(period);
+      }
+    }
+
     if (Object.prototype.hasOwnProperty.call(features, 'sentiment')) {
       const enabled = resolveFlag(features.sentiment);
       if (enabled !== undefined) trainingState.setSentimentEnabled(enabled);

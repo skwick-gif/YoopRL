@@ -144,6 +144,7 @@ class FeatureConfig:
     vix: bool = True
     bollinger: Dict[str, Any] = field(default_factory=lambda: {'enabled': False, 'params': '20,2'})
     stochastic: Dict[str, Any] = field(default_factory=lambda: {'enabled': False, 'params': '14,3'})
+    adx: Dict[str, Any] = field(default_factory=lambda: {'enabled': True, 'period': 14})
     multi_asset: Dict[str, Any] = field(default_factory=lambda: {
         'enabled': False,
         'symbols': ['SPY', 'QQQ', 'TLT', 'GLD']
@@ -151,6 +152,7 @@ class FeatureConfig:
     
     # Alternative data
     sentiment: bool = False
+    macro: bool = False
     social_media: bool = False
     news_headlines: bool = False
     market_events: bool = False
@@ -170,6 +172,7 @@ class FeatureConfig:
             'bollinger': {'enabled': False},
             'stochastic': {'enabled': False},
             'sentiment': False,
+            'macro': False,
             'social_media': False,
             'news_headlines': False,
             'market_events': False,
@@ -183,6 +186,7 @@ class FeatureConfig:
             'bollinger': {'enabled': True, 'params': '20,2'},
             'stochastic': {'enabled': True, 'params': '14,3'},
             'sentiment': True,
+            'macro': False,
             'social_media': True,
             'news_headlines': True,
             'market_events': True,

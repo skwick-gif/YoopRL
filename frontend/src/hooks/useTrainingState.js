@@ -93,6 +93,9 @@ export const useTrainingState = () => {
   
   const [stochasticEnabled, setStochasticEnabled] = useState(false);
   const [stochasticParams, setStochasticParams] = useState('14,3');
+  
+  const [adxEnabled, setAdxEnabled] = useState(true);
+  const [adxPeriod, setAdxPeriod] = useState(14);
 
   // Alternative Data
   const [sentimentEnabled, setSentimentEnabled] = useState(false);
@@ -121,6 +124,9 @@ export const useTrainingState = () => {
    * Returns JSON object ready to send to backend API
    */
   const buildTrainingConfig = (agentType) => {
+    const parsedAdxPeriod = parseInt(adxPeriod, 10);
+    const finalAdxPeriod = Number.isNaN(parsedAdxPeriod) ? 14 : parsedAdxPeriod;
+
     const config = {
       agent_type: agentType, // 'PPO' or 'SAC'
       symbol: agentType === 'PPO' ? ppoSymbol : sacSymbol,
@@ -161,6 +167,10 @@ export const useTrainingState = () => {
         stochastic: {
           enabled: stochasticEnabled,
           params: stochasticParams
+        },
+        adx: {
+          enabled: adxEnabled,
+          period: finalAdxPeriod
         },
         sentiment: sentimentEnabled,
         social_media: socialMediaEnabled,
@@ -276,6 +286,8 @@ export const useTrainingState = () => {
     setVixEnabled(true);
     setBollingerEnabled(false);
     setStochasticEnabled(false);
+    setAdxEnabled(true);
+    setAdxPeriod(14);
     setSentimentEnabled(false);
     setLlmEnabled(false);
   };
@@ -320,6 +332,7 @@ export const useTrainingState = () => {
     vixEnabled, setVixEnabled,
     bollingerEnabled, setBollingerEnabled, bollingerParams, setBollingerParams,
     stochasticEnabled, setStochasticEnabled, stochasticParams, setStochasticParams,
+    adxEnabled, setAdxEnabled, adxPeriod, setAdxPeriod,
     sentimentEnabled, setSentimentEnabled,
     socialMediaEnabled, setSocialMediaEnabled,
     newsHeadlinesEnabled, setNewsHeadlinesEnabled,

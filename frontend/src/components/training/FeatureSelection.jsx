@@ -131,6 +131,21 @@ function FeatureSelection({ trainingState }) {
               title="Stochastic Parameters: K period (14) and D period (3). Standard settings work for most timeframes." 
             />
           </label>
+
+          <label className="feature-checkbox" title="ADX / DMI: Average Directional Index with +DI / -DI to gauge trend strength. ADX above 25 usually signals a strong trend, below 20 a weak one.">
+            <input 
+              type="checkbox" 
+              checked={trainingState.adxEnabled}
+              onChange={(e) => trainingState.setAdxEnabled(e.target.checked)}
+            /> ADX / DMI
+            <input 
+              type="number"
+              min={5}
+              value={trainingState.adxPeriod}
+              onChange={(e) => trainingState.setAdxPeriod(parseInt(e.target.value, 10) || 14)}
+              title="ADX Period: Default 14. Lower values respond faster but can be noisy; higher values smooth the trend strength." 
+            />
+          </label>
         </div>
 
         {/* Alternative Data - External data sources (requires API keys/subscriptions) */}
