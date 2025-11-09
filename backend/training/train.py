@@ -17,8 +17,12 @@ from pathlib import Path
 import json
 from datetime import datetime
 import math
+from dataclasses import asdict, is_dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
@@ -30,11 +34,16 @@ sys.path.append(str(Path(__file__).parent.parent))
 from stable_baselines3.common.callbacks import BaseCallback
 from environments.stock_env import StockTradingEnv
 from environments.etf_env import ETFTradingEnv
+from environments.intraday_env import IntradayEquityEnv, IntradaySessionSampler
 from agents.agent_factory import create_agent
 from utils.state_normalizer import StateNormalizer
 from models.model_manager import ModelManager
 from config.training_config import TrainingConfig
 from evaluation.backtester import evaluate_trained_model
+from data_download.intraday_loader import METADATA_COLUMNS as INTRADAY_METADATA_COLUMNS, build_intraday_dataset
+from data_download.intraday_features import IntradayFeatureSpec, add_intraday_features
+from training.commission import resolve_commission_config
+from training.rewards.dsr_wrapper import DSRConfig, DSRRewardWrapper
 
 
 class ContinuousActionAdapter(gym.ActionWrapper):
@@ -57,6 +66,217 @@ class ContinuousActionAdapter(gym.ActionWrapper):
         return np.array([mapping.get(int(action), 0.0)], dtype=np.float32)
 
 
+AGENT_ALIAS_MAP = {
+    "SAC_INTRADAY_DSR": "SAC",
+}
+
+INTRADAY_FREQUENCY_FLAGS = {"intraday", "15m", "15min"}
+
+DEFAULT_MULTI_ASSET_SYMBOLS = ['SPY', 'QQQ', 'TLT', 'GLD']
+
+
+def _canonical_agent_type(agent_type: str) -> str:
+    if not agent_type:
+        return "PPO"
+    normalized = agent_type.upper()
+    return AGENT_ALIAS_MAP.get(normalized, normalized)
+
+
+def _features_payload(features: Any) -> Dict[str, Any]:
+    if features is None:
+        return {}
+    if hasattr(features, "to_payload"):
+        try:
+            return dict(features.to_payload())  # type: ignore[arg-type]
+        except Exception:
+            pass
+    if is_dataclass(features):
+        return asdict(features)
+    if isinstance(features, dict):
+        return dict(features)
+    return {}
+
+
+def _infer_benchmark_symbol(symbol: str) -> str:
+    mapping = {
+        'TQQQ': 'QQQ',
+        'SQQQ': 'QQQ',
+        'UPRO': 'SPY',
+        'SPXL': 'SPY',
+        'TNA': 'IWM',
+        'TMF': 'TLT',
+    }
+    return mapping.get((symbol or '').upper(), 'SPY')
+
+
+def _sanitize_train_split(value: Any, default: float = 0.8) -> float:
+    try:
+        split = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if not (0.0 < split < 1.0):
+        return default
+
+    # Avoid degenerate splits
+    return float(max(0.05, min(split, 0.95)))
+
+
+def _is_intraday_mode(config_dict: Dict[str, Any]) -> bool:
+    requested_agent = str(config_dict.get('agent_type', '')).upper()
+    if requested_agent == 'SAC_INTRADAY_DSR':
+        return True
+
+    training_settings = config_dict.get('training_settings') or {}
+    frequency = str(training_settings.get('data_frequency', '')).lower()
+    if frequency in INTRADAY_FREQUENCY_FLAGS:
+        return True
+
+    interval = str(training_settings.get('interval', '')).lower()
+    return interval in {'15m', '15min'}
+
+
+def _append_matching(
+    target: List[str],
+    candidate_columns: Iterable[str],
+    predicate: Callable[[str], bool]
+) -> None:
+    for column in candidate_columns:
+        if predicate(column) and column not in target:
+            target.append(column)
+
+
+def _select_feature_columns(
+    df: pd.DataFrame,
+    features: Dict[str, Any],
+    *,
+    symbol: str,
+    benchmark_symbol: Optional[str],
+    intraday: bool
+) -> List[str]:
+    numeric_columns = [col for col in df.columns if is_numeric_dtype(df[col])]
+    if not numeric_columns:
+        return []
+
+    selected: List[str] = []
+    features = features or {}
+
+    def flag_enabled(key: str) -> bool:
+        value = features.get(key)
+        if isinstance(value, dict):
+            return bool(value.get('enabled', True))
+        if value is None:
+            return False
+        return bool(value)
+
+    def add_by_keywords(keywords: Iterable[str]) -> None:
+        lowered = [kw.lower() for kw in keywords]
+        _append_matching(
+            selected,
+            numeric_columns,
+            lambda col: any(kw in col.lower() for kw in lowered)
+        )
+
+    if flag_enabled('price'):
+        add_by_keywords(['price', 'close', 'adjclose'])
+
+    if flag_enabled('volume'):
+        add_by_keywords(['volume'])
+
+    if flag_enabled('ohlc'):
+        add_by_keywords(['open', 'high', 'low', 'close'])
+
+    if flag_enabled('returns'):
+        add_by_keywords(['return'])
+
+    if flag_enabled('rsi'):
+        add_by_keywords(['rsi'])
+
+    ema_block = features.get('ema')
+    if isinstance(ema_block, dict):
+        if ema_block.get('enabled', True):
+            add_by_keywords(['ema'])
+    elif flag_enabled('ema'):
+        add_by_keywords(['ema'])
+
+    if flag_enabled('macd'):
+        add_by_keywords(['macd'])
+
+    if flag_enabled('adx'):
+        add_by_keywords(['adx', 'plus_di', 'minus_di'])
+
+    if flag_enabled('bollinger'):
+        add_by_keywords(['bollinger', 'bb_'])
+
+    if flag_enabled('stochastic'):
+        add_by_keywords(['stoch'])
+
+    if flag_enabled('sentiment'):
+        add_by_keywords(['sentiment'])
+
+    if flag_enabled('macro'):
+        add_by_keywords(['macro_'])
+
+    if flag_enabled('base_trend_context'):
+        add_by_keywords(['base_trend_context'])
+
+    if flag_enabled('base_momentum'):
+        add_by_keywords(['base_momentum'])
+
+    if flag_enabled('base_trend_strength'):
+        add_by_keywords(['base_trend_strength', 'base_plus_di', 'base_minus_di'])
+
+    if flag_enabled('base_extremes'):
+        add_by_keywords(['base_extremes'])
+
+    if flag_enabled('leveraged_volatility'):
+        add_by_keywords(['leveraged_volatility'])
+
+    if flag_enabled('leveraged_momentum_short'):
+        add_by_keywords(['leveraged_momentum_short'])
+
+    if flag_enabled('time_context'):
+        add_by_keywords(['time_fraction', 'minutes_from_open', 'bar_index', 'is_session_end'])
+
+    if flag_enabled('position_context'):
+        add_by_keywords(['position_context'])
+
+    multi_asset_cfg = features.get('multi_asset')
+    if isinstance(multi_asset_cfg, dict) and multi_asset_cfg.get('enabled', False):
+        symbols = multi_asset_cfg.get('symbols') or DEFAULT_MULTI_ASSET_SYMBOLS
+        keywords = [sym.lower() for sym in symbols]
+        _append_matching(
+            selected,
+            numeric_columns,
+            lambda col: any(sym in col.lower() for sym in keywords)
+        )
+
+    llm_cfg = features.get('llm')
+    if isinstance(llm_cfg, dict) and llm_cfg.get('enabled', False):
+        add_by_keywords(['llm'])
+
+    if intraday:
+        primary_prefix = (symbol or '').lower()
+        benchmark_prefix = (benchmark_symbol or '').lower()
+        _append_matching(
+            selected,
+            numeric_columns,
+            lambda col: col.lower().startswith(primary_prefix + '_')
+        )
+        if benchmark_prefix:
+            _append_matching(
+                selected,
+                numeric_columns,
+                lambda col: col.lower().startswith(benchmark_prefix + '_')
+            )
+        add_by_keywords(['primary_return', 'benchmark_return'])
+
+    if not selected:
+        selected = list(numeric_columns)
+
+    return selected
+
+
 def _resolve_hyperparameters(config_dict: dict) -> dict:
     """Merge hyperparameter sources into a single dict.
 
@@ -65,7 +285,8 @@ def _resolve_hyperparameters(config_dict: dict) -> dict:
     Later sources override earlier ones so that explicit agent presets win.
     """
 
-    agent_type = config_dict.get('agent_type', '').upper()
+    requested_type = str(config_dict.get('agent_type', '')).upper()
+    agent_type = _canonical_agent_type(requested_type)
 
     merged: dict = {}
 
@@ -151,7 +372,13 @@ class TrainingProgressCallback(BaseCallback):
         self.episode_count += 1
 
 
-def load_data(symbol: str, start_date: str, end_date: str, features: dict = None) -> tuple:
+def load_data(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    features: dict = None,
+    train_split: float = 0.8
+) -> tuple:
     """
     Load training data from SQL database with real Yahoo Finance data.
     
@@ -169,26 +396,27 @@ def load_data(symbol: str, start_date: str, end_date: str, features: dict = None
     print(f"[INFO] Loading REAL data for {symbol} ({start_date} to {end_date})...")
     
     # Extract feature flags from config
+    features_payload = _features_payload(features)
     enable_sentiment = False
     enable_multi_asset = False
     multi_asset_symbols = None
     
-    if features:
+    if features_payload:
         # Check sentiment features
-        sentiment_config = features.get('sentiment', {})
+        sentiment_config = features_payload.get('sentiment', {})
         if isinstance(sentiment_config, dict):
             enable_sentiment = sentiment_config.get('enabled', False)
         else:
             enable_sentiment = bool(sentiment_config)
         
         # Check multi-asset features
-        multi_asset_config = features.get('multi_asset', {})
+        multi_asset_config = features_payload.get('multi_asset', {})
         if isinstance(multi_asset_config, dict):
             enable_multi_asset = multi_asset_config.get('enabled', False)
-            multi_asset_symbols = multi_asset_config.get('symbols', ['SPY', 'QQQ', 'TLT', 'GLD'])
+            multi_asset_symbols = multi_asset_config.get('symbols', DEFAULT_MULTI_ASSET_SYMBOLS)
         else:
             enable_multi_asset = bool(multi_asset_config)
-            multi_asset_symbols = ['SPY', 'QQQ', 'TLT', 'GLD']
+            multi_asset_symbols = DEFAULT_MULTI_ASSET_SYMBOLS
     
     # Calculate period from dates
     try:
@@ -212,15 +440,17 @@ def load_data(symbol: str, start_date: str, end_date: str, features: dict = None
     print(f"   Period: {period}, Sentiment: {enable_sentiment}, Multi-asset: {enable_multi_asset}")
     
     # Use the production-grade data pipeline
+    split_ratio = _sanitize_train_split(train_split, default=0.8)
+
     prepared_data, data_split = prepare_training_data(
         symbol=symbol,
         period=period,
-        train_test_split=0.8,
+        train_test_split=split_ratio,
         enable_sentiment=enable_sentiment,
         enable_multi_asset=enable_multi_asset,
         multi_asset_symbols=multi_asset_symbols if enable_multi_asset else None,
         force_redownload=False,
-        feature_config=features,  # ← NEW: Pass full feature config to FeatureEngineering
+        feature_config=features_payload,
     )
     
     # Filter by date range if needed
@@ -265,6 +495,58 @@ def load_data(symbol: str, start_date: str, end_date: str, features: dict = None
         print(f"   Sentiment features: {len(sentiment_features)} ({', '.join(sentiment_features)})")
     
     return train_data, test_data
+
+
+def _load_intraday_training_frames(
+    config_dict: Dict[str, Any],
+    train_split: float
+) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+    symbol = config_dict.get('symbol', '').upper()
+    if not symbol:
+        raise ValueError("Intraday training requires a valid symbol")
+
+    training_settings = config_dict.get('training_settings') or {}
+    benchmark_symbol = (
+        training_settings.get('benchmark_symbol')
+        or _infer_benchmark_symbol(symbol)
+    )
+
+    interval = training_settings.get('interval', '15m')
+    start = training_settings.get('start_date')
+    end = training_settings.get('end_date')
+
+    dataset = build_intraday_dataset(
+        (symbol, benchmark_symbol),
+        interval=str(interval or '15m'),
+        start=start,
+        end=end,
+    )
+
+    if dataset.empty:
+        raise ValueError(f"No intraday data available for {symbol} ({interval})")
+
+    dataset = dataset.sort_index()
+
+    feature_spec = IntradayFeatureSpec(
+        primary_symbol=symbol,
+        benchmark_symbol=benchmark_symbol,
+    )
+    dataset = add_intraday_features(dataset, feature_spec)
+
+    numeric_cols = [col for col in dataset.columns if is_numeric_dtype(dataset[col])]
+    dataset[numeric_cols] = dataset[numeric_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    split_ratio = _sanitize_train_split(train_split, default=0.8)
+    split_index = int(len(dataset) * split_ratio)
+    split_index = max(1, min(split_index, len(dataset) - 1))
+
+    train_df = dataset.iloc[:split_index].copy()
+    test_df = dataset.iloc[split_index:].copy()
+
+    if test_df.empty:
+        test_df = dataset.iloc[-max(1, len(dataset) // 5):].copy()
+
+    return train_df, test_df, benchmark_symbol
 
 
 def optimize_hyperparameters_with_optuna(
@@ -515,187 +797,219 @@ def train_agent(config) -> dict:
     if hasattr(config, 'to_dict'):
         config_dict = config.to_dict()
     elif not isinstance(config, dict):
-        # Handle dataclass without to_dict method
-        from dataclasses import asdict
         config_dict = asdict(config)
     else:
-        config_dict = config
-    
+        config_dict = dict(config)
+
+    requested_agent_type = str(config_dict.get('agent_type', 'PPO')).upper()
+    canonical_agent_type = _canonical_agent_type(requested_agent_type)
+    config_dict['agent_type'] = requested_agent_type
+
+    training_settings = config_dict.get('training_settings') or {}
+    if is_dataclass(training_settings):
+        training_settings = asdict(training_settings)
+    else:
+        training_settings = dict(training_settings)
+    config_dict['training_settings'] = training_settings
+
+    features_payload = _features_payload(config_dict.get('features'))
+    config_dict['features'] = features_payload
+
+    symbol = str(config_dict.get('symbol', '')).upper()
+    if not symbol:
+        raise ValueError("Training configuration must include a symbol")
+
+    train_split = _sanitize_train_split(training_settings.get('train_split', 0.8), default=0.8)
+    training_settings['train_split'] = train_split
+
     # Extract hyperparameters (supports both API payloads and TrainingConfig output)
     hyperparams = _resolve_hyperparameters(config_dict)
-    
+
     print(f"\n{'='*70}")
-    print(f">> Starting Training: {config_dict['agent_type']} Agent")
-    print(f"   Symbol: {config_dict['symbol']}")
-    print(f"   Date Range: {config_dict['training_settings']['start_date']} to {config_dict['training_settings']['end_date']}")
+    print(f">> Starting Training: {requested_agent_type} Agent (canonical: {canonical_agent_type})")
+    date_range = (
+        f"{training_settings.get('start_date', 'N/A')} to {training_settings.get('end_date', 'N/A')}"
+    )
+    print(f"   Symbol: {symbol}")
+    print(f"   Date Range: {date_range}")
+    print(f"   Train/Test Split: {train_split:.2f}/{1-train_split:.2f}")
     print(f"{'='*70}\n")
     
     try:
-        # 1. Load Data
-        train_data, test_data = load_data(
-            symbol=config_dict['symbol'],
-            start_date=config_dict['training_settings']['start_date'],
-            end_date=config_dict['training_settings']['end_date'],
-            features=config_dict['features']
+        intraday_mode = _is_intraday_mode(config_dict)
+        reward_mode = str(training_settings.get('reward_mode', '')).lower()
+        dsr_config_raw = training_settings.get('dsr_config') or {}
+        dsr_config_obj: Optional[DSRConfig] = None
+
+        if intraday_mode:
+            train_market, test_market, benchmark_symbol = _load_intraday_training_frames(config_dict, train_split)
+            training_settings.setdefault('benchmark_symbol', benchmark_symbol)
+            interval = training_settings.get('interval', '15m')
+        else:
+            train_market, test_market = load_data(
+                symbol=symbol,
+                start_date=training_settings.get('start_date'),
+                end_date=training_settings.get('end_date'),
+                features=features_payload,
+                train_split=train_split,
+            )
+            benchmark_symbol = training_settings.get('benchmark_symbol') or _infer_benchmark_symbol(symbol)
+            interval = training_settings.get('interval', '1d')
+
+        print(f"[INFO] Data frequency: {'intraday' if intraday_mode else 'daily'} (interval={interval})")
+        print(f"   Training samples: {len(train_market)} | Test samples: {len(test_market)}")
+
+        feature_candidates = _select_feature_columns(
+            train_market,
+            features_payload,
+            symbol=symbol,
+            benchmark_symbol=benchmark_symbol,
+            intraday=intraday_mode,
         )
-        
-        # Remove non-numeric columns (like 'date')
-        numeric_columns = train_data.select_dtypes(include=[np.number]).columns.tolist()
-        train_data = train_data[numeric_columns]
-        test_data = test_data[numeric_columns]
-        
-        # 2. Normalize Data
+
+        numeric_feature_columns = [
+            col for col in feature_candidates
+            if col in train_market.columns and is_numeric_dtype(train_market[col])
+        ]
+
+        if not numeric_feature_columns:
+            numeric_feature_columns = [
+                col for col in train_market.columns if is_numeric_dtype(train_market[col])
+            ]
+
+        if not numeric_feature_columns:
+            raise ValueError("No numeric features available after applying feature configuration.")
+
+        train_numeric = train_market[numeric_feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        test_numeric = test_market[numeric_feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        metadata_columns: List[str] = []
+        if intraday_mode:
+            metadata_columns = [col for col in INTRADAY_METADATA_COLUMNS if col in train_market.columns]
+
+        train_df = train_numeric.copy()
+        test_df = test_numeric.copy()
+        for meta_col in metadata_columns:
+            train_df[meta_col] = train_market[meta_col]
+            test_df[meta_col] = test_market[meta_col]
+
+        if reward_mode == 'dsr':
+            try:
+                clip_raw = dsr_config_raw.get('clip_value')
+                clip_value = None if clip_raw in (None, '', 'none', 'None') else float(clip_raw)
+                dsr_config_obj = DSRConfig(
+                    decay=float(dsr_config_raw.get('decay', 0.94)),
+                    epsilon=float(dsr_config_raw.get('epsilon', 1e-9)),
+                    warmup_steps=int(dsr_config_raw.get('warmup_steps', 200)),
+                    clip_value=clip_value,
+                )
+                dsr_config_obj.validate()
+            except Exception as exc:  # pragma: no cover - config validation
+                raise ValueError(f"Invalid DSR configuration: {exc}") from exc
+
+        feature_display = ', '.join(numeric_feature_columns[:15])
+        if len(numeric_feature_columns) > 15:
+            feature_display += ', ...'
+
         print("\n[INFO] Normalizing features...")
-        
-        # Extract feature names - handle both boolean and dict features
-        # Match them to actual column names in the data
-        feature_names = []
-        available_columns = [col for col in train_data.columns if col != 'date']
-        
-        for k, v in config_dict['features'].items():
-            # Skip agent history features (not in market data)
-            if k in ['recent_actions', 'performance', 'position_history', 'reward_history']:
-                continue
-            
-            if isinstance(v, bool) and v:
-                # Simple boolean feature like 'ohlcv' or 'fundamentals'
-                if k == 'ohlcv':
-                    # Add OHLCV columns
-                    ohlcv_cols = [col for col in available_columns if col in ['Open', 'High', 'Low', 'price', 'volume']]
-                    feature_names.extend(ohlcv_cols)
-                elif k == 'technical':
-                    # Add all technical indicator columns
-                    tech_cols = [col for col in available_columns if any(prefix in col.lower() for prefix in 
-                                ['sma', 'ema', 'rsi', 'macd', 'bb_', 'stochastic', 'atr', 'adx', 'returns', 'log_returns'])]
-                    feature_names.extend(tech_cols)
-                elif k in available_columns:
-                    feature_names.append(k)
-                else:
-                    keyword = k.replace('_', '').lower()
-                    matches = [col for col in available_columns if keyword in col.replace('_', '').lower()]
-                    feature_names.extend(matches)
-            elif isinstance(v, dict):
-                if k == 'multi_asset':
-                    if v.get('enabled'):
-                        symbols = v.get('symbols') or []
-                        if not symbols:
-                            symbols = ['SPY', 'QQQ', 'TLT', 'GLD']
-                        lookup = [s.lower() for s in symbols]
-                        multi_cols = [col for col in available_columns if any(sym in col.lower() for sym in lookup)]
-                        feature_names.extend(multi_cols)
-                    continue
-                # Complex feature with parameters (technical indicators)
-                if k == 'technical':
-                    # Technical dict with specific indicators
-                    for indicator, enabled in v.items():
-                        if enabled:
-                            if indicator == 'sma':
-                                sma_cols = [col for col in available_columns if col.startswith('sma_')]
-                                feature_names.extend(sma_cols)
-                            elif indicator == 'ema':
-                                ema_cols = [col for col in available_columns if col.startswith('ema_')]
-                                feature_names.extend(ema_cols)
-                            elif indicator == 'rsi':
-                                if 'rsi' in available_columns:
-                                    feature_names.append('rsi')
-                            elif indicator == 'macd':
-                                macd_cols = [col for col in available_columns if 'macd' in col.lower()]
-                                feature_names.extend(macd_cols)
-                            elif indicator == 'bollinger':
-                                bb_cols = [col for col in available_columns if col.startswith('bb_')]
-                                feature_names.extend(bb_cols)
-                            elif indicator == 'stochastic':
-                                stoch_cols = [col for col in available_columns if col.startswith('stochastic_')]
-                                feature_names.extend(stoch_cols)
-                elif v.get('enabled', False):
-                    if k == 'llm':
-                        llm_cols = [col for col in available_columns if 'llm' in col.lower()]
-                        feature_names.extend(llm_cols)
-                    elif k in available_columns:
-                        feature_names.append(k)
-                    else:
-                        keyword = k.replace('_', '').lower()
-                        matches = [col for col in available_columns if keyword in col.replace('_', '').lower()]
-                        feature_names.extend(matches)
-        
-        # Remove duplicates while preserving order
-        feature_names = list(dict.fromkeys(feature_names))
-        
-        if not feature_names:
-            raise ValueError("No valid features selected. At least 'price' and 'volume' should be available.")
-        
-        print(f"   Selected features ({len(feature_names)}): {', '.join(feature_names)}")
-        
+        print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
+
         normalizer = StateNormalizer(method='zscore')
-        normalizer.fit(train_data[feature_names].values)
-        
-        # Save normalizer params
-        normalizer_path = f"backend/models/normalizer_{config_dict['symbol']}_{config_dict['agent_type']}.json"
+        normalizer.fit(train_numeric.values)
+
+        normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
         normalizer.save_params(normalizer_path)
-        
         print(f"[OK] Normalization complete, saved to {normalizer_path}")
         
         # 3. Create Environment
         print("\n[INFO] Creating trading environment...")
-        
-        initial_capital = config_dict['training_settings'].get('initial_capital')
+
+        initial_capital = training_settings.get('initial_capital')
         if initial_capital is None:
-            initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
-        commission = config_dict['training_settings'].get('commission', 1.0)
-        max_position_size = config_dict['training_settings'].get('max_position_size', 1.0)
-        normalize_obs = config_dict['training_settings'].get('normalize_obs', True)
-        history_config = _extract_history_config(config_dict.get('features', {}))
-        
-        if config_dict['agent_type'].upper() == 'PPO':
+            initial_capital = training_settings.get('initial_cash', 100000)
+        initial_capital = float(initial_capital)
+
+        max_position_size = float(training_settings.get('max_position_size', 1.0))
+        normalize_obs = bool(training_settings.get('normalize_obs', True))
+        history_config = _extract_history_config(features_payload)
+
+        commission_config = resolve_commission_config(training_settings)
+
+        if reward_mode == 'dsr' and dsr_config_obj is None:
+            dsr_config_obj = DSRConfig()
+
+        if canonical_agent_type == 'PPO':
             env = StockTradingEnv(
-                df=train_data,
+                df=train_df,
                 initial_capital=initial_capital,
-                commission=commission,
+                commission=commission_config,
                 max_position_size=max_position_size,
                 risk_penalty=hyperparams.get('risk_penalty', -0.5),
                 normalize_obs=normalize_obs,
                 history_config=history_config
             )
-            print(f"[OK] StockTradingEnv created (PPO-optimized)")
-        
-        elif config_dict['agent_type'].upper() == 'SAC':
-            env = ETFTradingEnv(
-                df=train_data,
-                initial_capital=initial_capital,
-                commission=commission,
-                max_position_size=max_position_size,
-                vol_penalty=hyperparams.get('vol_penalty', -0.3),
-                leverage_factor=hyperparams.get('leverage_factor', 3.0),
-                normalize_obs=normalize_obs,
-                history_config=history_config
-            )
-            env = ContinuousActionAdapter(env)
-            print(f"[OK] ETFTradingEnv created (SAC-optimized)")
-        
+            print("[OK] StockTradingEnv created (PPO)")
+
+        elif canonical_agent_type == 'SAC':
+            if intraday_mode:
+                sampler = IntradaySessionSampler(shuffle=True)
+                base_env = IntradayEquityEnv(
+                    df=train_df,
+                    initial_capital=initial_capital,
+                    commission=commission_config,
+                    max_position_size=max_position_size,
+                    normalize_obs=normalize_obs,
+                    history_config=history_config,
+                    sampler=sampler
+                )
+                env_label = "IntradayEquityEnv"
+            else:
+                base_env = ETFTradingEnv(
+                    df=train_df,
+                    initial_capital=initial_capital,
+                    commission=commission_config,
+                    max_position_size=max_position_size,
+                    vol_penalty=hyperparams.get('vol_penalty', -0.3),
+                    leverage_factor=hyperparams.get('leverage_factor', 3.0),
+                    normalize_obs=normalize_obs,
+                    history_config=history_config
+                )
+                env_label = "ETFTradingEnv"
+
+            if reward_mode == 'dsr' and dsr_config_obj is not None:
+                base_env = DSRRewardWrapper(base_env, config=dsr_config_obj)
+
+            env = ContinuousActionAdapter(base_env)
+            print(f"[OK] {env_label} created (SAC)")
+
         else:
-            raise ValueError(f"Unknown agent type: {config_dict['agent_type']}")
+            raise ValueError(f"Unknown agent type: {requested_agent_type}")
         
         # 4. Create Agent
         print("\n[INFO] Creating RL agent...")
         
         agent = create_agent(
-            agent_type=config_dict['agent_type'].upper(),
+            agent_type=canonical_agent_type,
             env=env,
             hyperparameters=hyperparams,
-            model_dir=f"backend/models/{config_dict['agent_type'].lower()}"
+            model_dir=f"backend/models/{canonical_agent_type.lower()}"
         )
-        
-        print(f"[OK] {config_dict['agent_type']} agent created")
+
+        print(f"[OK] {canonical_agent_type} agent created")
         
         # 4.5. Optuna Hyperparameter Optimization (Optional)
-        optuna_trials = config_dict['training_settings'].get('optuna_trials', 0)
+        optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
+        if intraday_mode and optuna_trials > 0:
+            print("[WARN] Optuna optimization is not currently supported for the intraday pipeline; skipping trials.")
+            optuna_trials = 0
+
         if optuna_trials > 0:
             print(f"\n[OPTUNA] Running optimization with {optuna_trials} trials...")
             optimized_hyperparams = optimize_hyperparameters_with_optuna(
                 config_dict=config_dict,
-                train_data=train_data,
-                test_data=test_data,
-                feature_names=feature_names,
+                train_data=train_df,
+                test_data=test_df,
+                feature_names=numeric_feature_columns,
                 n_trials=optuna_trials
             )
             
@@ -705,10 +1019,10 @@ def train_agent(config) -> dict:
             # Recreate agent with optimized hyperparameters
             print("\n[INFO] Recreating agent with optimized hyperparameters...")
             agent = create_agent(
-                agent_type=config_dict['agent_type'].upper(),
+                agent_type=canonical_agent_type,
                 env=env,
                 hyperparameters=hyperparams,
-                model_dir=f"backend/models/{config_dict['agent_type'].lower()}"
+                model_dir=f"backend/models/{canonical_agent_type.lower()}"
             )
             print(f"[OK] Agent recreated with optimized parameters")
         
@@ -716,13 +1030,13 @@ def train_agent(config) -> dict:
         print("\n[TRAIN] Training agent...")
 
         # Calculate total timesteps with sane defaults and caps
-        steps_per_episode = max(1, len(train_data))
+        steps_per_episode = max(1, len(train_df))
         requested_total_timesteps = (
             hyperparams.get('total_timesteps')
-            or config_dict['training_settings'].get('total_timesteps')
+            or training_settings.get('total_timesteps')
         )
         requested_episode_budget = hyperparams.get('episodes')
-        fallback_episode_budget = config_dict['training_settings'].get('episode_budget')
+        fallback_episode_budget = training_settings.get('episode_budget')
 
         resolved_episode_budget = None
         if requested_total_timesteps:
@@ -737,7 +1051,7 @@ def train_agent(config) -> dict:
 
             total_timesteps_requested = resolved_episode_budget * steps_per_episode
 
-        max_total_timesteps = config_dict['training_settings'].get('max_total_timesteps', 1_000_000)
+        max_total_timesteps = training_settings.get('max_total_timesteps', 1_000_000)
         if not isinstance(max_total_timesteps, int) or max_total_timesteps <= 0:
             max_total_timesteps = 1_000_000
 
@@ -781,31 +1095,45 @@ def train_agent(config) -> dict:
         print(f"\n[OK] Training complete in {training_duration:.1f} seconds")
         
         # 6. Evaluate on Test Set
-        print("\n[EVAL] Evaluating model on test set (20%)...")
+        test_pct = max(0.0, 100.0 * (1.0 - train_split))
+        print(f"\n[EVAL] Evaluating model on test set (~{test_pct:.0f}%)...")
         
         # Create test environment
-        if config_dict['agent_type'].upper() == 'PPO':
+        if canonical_agent_type == 'PPO':
             test_env = StockTradingEnv(
-                df=test_data,
+                df=test_df,
                 initial_capital=initial_capital,
-                commission=commission,
+                commission=commission_config,
                 max_position_size=max_position_size,
                 risk_penalty=hyperparams.get('risk_penalty', -0.5),
                 normalize_obs=normalize_obs,
                 history_config=history_config
             )
         else:
-            test_env = ETFTradingEnv(
-                df=test_data,
-                initial_capital=initial_capital,
-                commission=commission,
-                max_position_size=max_position_size,
-                vol_penalty=hyperparams.get('vol_penalty', -0.3),
-                leverage_factor=hyperparams.get('leverage_factor', 3.0),
-                normalize_obs=normalize_obs,
-                history_config=history_config
-            )
-            test_env = ContinuousActionAdapter(test_env)
+            if intraday_mode:
+                eval_sampler = IntradaySessionSampler(shuffle=False, sequential=True)
+                base_test_env = IntradayEquityEnv(
+                    df=test_df,
+                    initial_capital=initial_capital,
+                    commission=commission_config,
+                    max_position_size=max_position_size,
+                    normalize_obs=normalize_obs,
+                    history_config=history_config,
+                    sampler=eval_sampler
+                )
+            else:
+                base_test_env = ETFTradingEnv(
+                    df=test_df,
+                    initial_capital=initial_capital,
+                    commission=commission_config,
+                    max_position_size=max_position_size,
+                    vol_penalty=hyperparams.get('vol_penalty', -0.3),
+                    leverage_factor=hyperparams.get('leverage_factor', 3.0),
+                    normalize_obs=normalize_obs,
+                    history_config=history_config
+                )
+
+            test_env = ContinuousActionAdapter(base_test_env)
         
         # Run evaluation
         try:
@@ -818,6 +1146,8 @@ def train_agent(config) -> dict:
             
             # Extract metrics
             test_metrics = eval_results['metrics']
+            if 'final_balance' not in test_metrics:
+                test_metrics['final_balance'] = initial_capital
             
             print(f"\n{'='*70}")
             print(f"[RESULTS] Test Set Performance:")
@@ -858,23 +1188,31 @@ def train_agent(config) -> dict:
         version = datetime.now().strftime("v%Y%m%d_%H%M%S")
         
         model_manager = ModelManager(base_dir='backend/models')
-        agent_type_lower = config_dict['agent_type'].lower()
-        symbol_upper = config_dict['symbol'].upper()
+        agent_type_lower = canonical_agent_type.lower()
+        symbol_upper = symbol
         model_path = Path(model_manager.base_dir) / agent_type_lower / f"{agent_type_lower}_{symbol_upper}_{version}.zip"
-        
+
+        data_frequency = training_settings.get('data_frequency') or ('intraday' if intraday_mode else 'daily')
+
         # Create metadata with REAL metrics
         metadata = {
-            'agent_type': config_dict['agent_type'].upper(),
-            'symbol': config_dict['symbol'],
+            'agent_type': requested_agent_type,
+            'canonical_agent_type': canonical_agent_type,
+            'symbol': symbol,
             'version': version,
             'created': datetime.now().isoformat(),
             'created_at': datetime.now().isoformat(),  # For compatibility with ModelSelector
             'hyperparameters': hyperparams,
-            'features': config_dict['features'],  # Original feature config
-            'features_used': feature_names,  # Actual features used in training
-            'training_settings': config_dict['training_settings'],
-            'train_samples': len(train_data),
-            'test_samples': len(test_data),
+            'features': features_payload,
+            'features_used': numeric_feature_columns,
+            'training_settings': training_settings,
+            'train_samples': len(train_df),
+            'test_samples': len(test_df),
+            'benchmark_symbol': benchmark_symbol,
+            'interval': interval,
+            'data_frequency': data_frequency,
+            'reward_mode': reward_mode,
+            'dsr_config': dsr_config_raw if reward_mode == 'dsr' else {},
             'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
             'episodes': int(effective_episodes),
             'total_timesteps_requested': int(total_timesteps_requested),
@@ -899,17 +1237,19 @@ def train_agent(config) -> dict:
             'trade_history': eval_results.get('trades', [])
         }
         
-        model_manager.save_model(
+        model_id = model_manager.save_model(
             model=agent.model,
-            agent_type=config_dict['agent_type'],
-            symbol=config_dict['symbol'],
+            agent_type=canonical_agent_type,
+            symbol=symbol,
             metadata=metadata,
             version=version
         )
-        
+
+        metadata['model_id'] = model_id
+
         print(f"[OK] Model saved: {model_path}")
         print(f"[OK] Metadata saved")
-        
+
         print(f"\n{'='*70}")
         print(f"[OK] Training Complete!")
         print(f"   Model: {version}")
@@ -923,11 +1263,12 @@ def train_agent(config) -> dict:
             'status': 'success',
             'model_path': str(model_path),
             'metadata': metadata,
-            'version': version
+            'version': version,
+            'model_id': model_id
         }
     
     except Exception as e:
-        print(f"\n❌ Training failed: {str(e)}")
+        print(f"\n[ERROR] Training failed: {e}")
         import traceback
         traceback.print_exc()
         

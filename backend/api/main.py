@@ -795,13 +795,29 @@ def run_backtest_endpoint():
         _, test_data = load_data(symbol, start_date, end_date)
         
         logger.info(f"Running backtest on {model_path}...")
+
+        metadata_path = model_path.with_name(f"{model_path.stem}_metadata.json")
+        commission_payload = None
+        if metadata_path.exists():
+            try:
+                with metadata_path.open('r', encoding='utf-8') as handle:
+                    model_metadata = json.load(handle)
+                commission_payload = (
+                    model_metadata.get('commission_config')
+                    or model_metadata.get('training_settings')
+                )
+            except Exception as meta_exc:  # pragma: no cover - logging only
+                logger.warning(f"Failed to read metadata for commission config: {meta_exc}")
+                commission_payload = None
+        commission_payload = commission_payload or data.get('training_settings')
         
         # Run backtest
         results = run_backtest(
             model_path=str(model_path),
             test_data=test_data,
             agent_type=agent_type,
-            save_path=None  # Don't save for now
+            save_path=None,  # Don't save for now
+            commission_settings=commission_payload,
         )
         
         # Optionally save results
@@ -810,7 +826,12 @@ def run_backtest_endpoint():
             results_file = f"backend/results/backtest_{agent_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
             
             from evaluation.backtester import Backtester
-            backtester = Backtester(model_path, test_data, agent_type)
+            backtester = Backtester(
+                model_path,
+                test_data,
+                agent_type,
+                commission_settings=commission_payload,
+            )
             backtester.save_results(results, results_file)
         
         logger.info(f"Backtest complete. Sharpe: {results['metrics']['sharpe_ratio']}, Return: {results['metrics']['total_return']}%")

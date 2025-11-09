@@ -12,6 +12,7 @@
 data/*.db
 data/*.csv
 data/*.json
+data/intraday/
 
 # ============================================
 # PYTHON

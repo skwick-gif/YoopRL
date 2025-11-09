@@ -239,6 +239,39 @@ class DatabaseManager:
                 ON market_data(datetime)
             """)
             
+            # Intraday Market Data Table
+            # Stores high-frequency bars (e.g., 15m) with session metadata
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS intraday_market_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    datetime TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    session_date TEXT NOT NULL,
+                    minutes_from_open REAL,
+                    bar_index INTEGER,
+                    time_fraction REAL,
+                    is_session_end INTEGER,
+                    UNIQUE(symbol, interval, timestamp)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_intraday_symbol_interval_datetime
+                ON intraday_market_data(symbol, interval, datetime)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_intraday_session
+                ON intraday_market_data(symbol, interval, session_date)
+            """)
+
             # Sentiment Data Table
             # Daily sentiment features from news and social media
             # Used for: Enhancing RL agent features with market sentiment
@@ -723,6 +756,181 @@ class DatabaseManager:
             
         except Exception as e:
             logger.error(f"Error retrieving market data for {symbol}: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def save_intraday_data(self, symbol: str, interval: str, df: 'pd.DataFrame') -> int:
+        """Persist intraday OHLCV bars with session metadata."""
+
+        import pandas as pd
+        import pytz
+
+        if df.empty:
+            return 0
+
+        required_columns = {
+            'Open', 'High', 'Low', 'Close', 'Volume',
+            'session_date', 'minutes_from_open', 'bar_index',
+            'time_fraction', 'is_session_end'
+        }
+        missing = required_columns.difference(df.columns)
+        if missing:
+            raise ValueError(f"Intraday DataFrame missing columns: {sorted(missing)}")
+
+        ny_tz = pytz.timezone("America/New_York")
+        symbol = symbol.upper()
+        interval = interval.lower()
+
+        def _safe_float(value):
+            return float(value) if pd.notna(value) else None
+
+        def _safe_int(value):
+            return int(value) if pd.notna(value) else None
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            rows = []
+            for idx, row in df.iterrows():
+                ts = pd.to_datetime(idx)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize(ny_tz)
+                else:
+                    ts = ts.tz_convert(ny_tz)
+                ts_utc = ts.tz_convert(pytz.UTC)
+
+                rows.append((
+                    symbol,
+                    interval,
+                    float(ts_utc.timestamp()),
+                    ts.isoformat(),
+                    _safe_float(row.get('Open')),
+                    _safe_float(row.get('High')),
+                    _safe_float(row.get('Low')),
+                    _safe_float(row.get('Close')),
+                    _safe_float(row.get('Volume')),
+                    str(row.get('session_date')),
+                    _safe_float(row.get('minutes_from_open')),
+                    _safe_int(row.get('bar_index')),
+                    _safe_float(row.get('time_fraction')),
+                    1 if bool(row.get('is_session_end')) else 0
+                ))
+
+            cursor.executemany(
+                """
+                INSERT OR REPLACE INTO intraday_market_data (
+                    symbol, interval, timestamp, datetime,
+                    open, high, low, close, volume,
+                    session_date, minutes_from_open, bar_index,
+                    time_fraction, is_session_end
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows
+            )
+
+            conn.commit()
+            logger.info(
+                "Saved %s intraday rows for %s (%s)",
+                len(rows), symbol, interval
+            )
+            return len(rows)
+
+        except Exception as exc:
+            logger.error("Error saving intraday data for %s (%s): %s", symbol, interval, exc)
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def get_intraday_session_bounds(
+        self,
+        symbol: str,
+        interval: str = "15m"
+    ) -> Optional[Dict[str, Any]]:
+        """Return earliest and latest session dates for intraday data."""
+
+        query = (
+            "SELECT MIN(session_date) AS min_date, MAX(session_date) AS max_date "
+            "FROM intraday_market_data WHERE symbol = ? AND interval = ?"
+        )
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (symbol.upper(), interval))
+            row = cursor.fetchone()
+            if not row or not row["min_date"] or not row["max_date"]:
+                return None
+
+            return {
+                "min_date": row["min_date"],
+                "max_date": row["max_date"],
+            }
+        except Exception as exc:
+            logger.error(
+                "Error retrieving intraday session bounds for %s (%s): %s",
+                symbol,
+                interval,
+                exc,
+            )
+            return None
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def get_intraday_data(
+        self,
+        symbol: str,
+        interval: str = "15m",
+        start: Optional[str] = None,
+        end: Optional[str] = None
+    ) -> 'pd.DataFrame':
+        """Retrieve intraday bars with session metadata from SQLite."""
+
+        import pandas as pd
+        import pytz
+
+        conn = self._get_connection()
+
+        try:
+            query = (
+                "SELECT datetime, open, high, low, close, volume, session_date, "
+                "minutes_from_open, bar_index, time_fraction, is_session_end "
+                "FROM intraday_market_data WHERE symbol = ? AND interval = ?"
+            )
+            params: list[Any] = [symbol.upper(), interval.lower()]
+
+            if start:
+                query += " AND datetime >= ?"
+                params.append(start)
+
+            if end:
+                query += " AND datetime <= ?"
+                params.append(end)
+
+            query += " ORDER BY datetime ASC"
+
+            df = pd.read_sql_query(query, conn, params=params)
+            if df.empty:
+                return df
+
+            # Normalize datetime index to a consistent timezone to avoid mixed tz errors
+            utc_index = pd.DatetimeIndex(pd.to_datetime(df['datetime'], utc=True))
+            ny_tz = pytz.timezone("America/New_York")
+            dt_index = utc_index.tz_convert(ny_tz)
+
+            df = df.drop(columns=['datetime'])
+            df.index = dt_index
+            df['is_session_end'] = df['is_session_end'].astype(bool)
+
+            return df
+
+        except Exception as exc:
+            logger.error("Error retrieving intraday data for %s (%s): %s", symbol, interval, exc)
             raise
         finally:
             conn.close()

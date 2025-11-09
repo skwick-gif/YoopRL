@@ -122,7 +122,8 @@ class RetrainingScheduler:
             backtest_results = run_backtest(
                 model_path=new_model_path,
                 test_data=test_data,
-                agent_type=self.config['agent_type']
+                agent_type=self.config['agent_type'],
+                commission_settings=self.config.get('training_settings')
             )
             
             new_sharpe = backtest_results['metrics']['sharpe_ratio']

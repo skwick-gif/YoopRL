@@ -19,7 +19,7 @@ from pathlib import Path
 import json
 import sys
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -29,6 +29,7 @@ from environments.etf_env import ETFTradingEnv
 from agents.ppo_agent import PPOAgent
 from agents.sac_agent import SACAgent
 from evaluation.metrics import calculate_all_metrics
+from training.commission import resolve_commission_config
 
 
 class Backtester:
@@ -39,7 +40,13 @@ class Backtester:
     performance metrics including comparison to Buy & Hold benchmark.
     """
     
-    def __init__(self, model_path: str, test_data: pd.DataFrame, agent_type: str = 'PPO'):
+    def __init__(
+        self,
+        model_path: str,
+        test_data: pd.DataFrame,
+        agent_type: str = 'PPO',
+        commission_settings: Optional[Union[Dict[str, Any], Any]] = None,
+    ):
         """
         Initialize backtester.
         
@@ -47,17 +54,27 @@ class Backtester:
             model_path: Path to trained model file (.zip)
             test_data: Test data DataFrame with OHLCV + features
             agent_type: 'PPO' or 'SAC'
+            commission_settings: Optional commission settings payload (dict or TrainingSettings)
         """
         self.model_path = Path(model_path)
         self.test_data = test_data
         self.agent_type = agent_type.upper()
         
+        commission_config = resolve_commission_config(commission_settings)
+        self.commission_config = commission_config
+
         # Create environment
         if self.agent_type == 'PPO':
-            self.env = StockTradingEnv(df=test_data)
+            self.env = StockTradingEnv(
+                df=test_data,
+                commission=commission_config,
+            )
             self.agent = PPOAgent(env=self.env, hyperparameters={})
         elif self.agent_type == 'SAC':
-            self.env = ETFTradingEnv(df=test_data)
+            self.env = ETFTradingEnv(
+                df=test_data,
+                commission=commission_config,
+            )
             self.agent = SACAgent(env=self.env, hyperparameters={})
         else:
             raise ValueError(f"Unknown agent type: {agent_type}")
@@ -332,7 +349,8 @@ def run_backtest(
     model_path: str,
     test_data: pd.DataFrame,
     agent_type: str = 'PPO',
-    save_path: str = None
+    save_path: str = None,
+    commission_settings: Optional[Union[Dict[str, Any], Any]] = None,
 ) -> Dict:
     """
     Convenience function to run backtest from saved model file.
@@ -343,10 +361,22 @@ def run_backtest(
         agent_type: 'PPO' or 'SAC'
         save_path: Optional path to save results JSON
     
+    Args:
+        model_path: Path to trained model
+        test_data: Test data DataFrame
+        agent_type: 'PPO' or 'SAC'
+        save_path: Optional path to save results JSON
+        commission_settings: Raw commission config or TrainingSettings section
+
     Returns:
         Backtest results dictionary
     """
-    backtester = Backtester(model_path, test_data, agent_type)
+    backtester = Backtester(
+        model_path=model_path,
+        test_data=test_data,
+        agent_type=agent_type,
+        commission_settings=commission_settings,
+    )
     results = backtester.run()
     
     if save_path:

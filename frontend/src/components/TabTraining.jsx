@@ -55,7 +55,10 @@ function TabTraining() {
   const [trainingId, setTrainingId] = useState(null);
   
   // Agent selection
-  const [selectedAgent, setSelectedAgent] = useState('PPO'); // 'PPO' or 'SAC'
+  const [selectedAgent, setSelectedAgent] = useState('PPO'); // 'PPO', 'SAC', 'SAC_INTRADAY_DSR'
+  const INTRADAY_AGENT = 'SAC_INTRADAY_DSR';
+  const resolveAgentType = (agent) => (agent === INTRADAY_AGENT ? 'SAC' : agent);
+  const isIntradayAgent = selectedAgent === INTRADAY_AGENT;
   
   // Backtest results
   const [backtestResults, setBacktestResults] = useState(null);
@@ -207,7 +210,7 @@ function TabTraining() {
     sharpeValue >= 0.5 &&
     !deployingAgent;
   const canDeploySAC =
-    selectedAgent === 'SAC' &&
+    (selectedAgent === 'SAC' || isIntradayAgent) &&
     !!selectedModel &&
     selectedModel.agent_type === 'SAC' &&
     sharpeValue >= 0.5 &&
@@ -246,7 +249,8 @@ function TabTraining() {
   useEffect(() => {
     const checkDrift = async () => {
       try {
-        const symbol = selectedAgent === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
+        const agentForPayload = resolveAgentType(selectedAgent);
+        const symbol = agentForPayload === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
         
         // Skip if no symbol configured
         if (!symbol) {
@@ -254,7 +258,7 @@ function TabTraining() {
           return;
         }
         
-        const result = await checkDriftStatus(symbol, selectedAgent);
+        const result = await checkDriftStatus(symbol, agentForPayload);
         
         if (result.success && result.drift_data) {
           setDriftData(result.drift_data);
@@ -280,13 +284,22 @@ function TabTraining() {
     setDataDownloaded(false);
     
     try {
+      const agentForPayload = resolveAgentType(selectedAgent);
+      const symbol = agentForPayload === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
+      const benchmarkSymbol = selectedAgent === INTRADAY_AGENT
+        ? (trainingState.sacBenchmarkSymbol || 'IWM')
+        : null;
+      if (!symbol) {
+        throw new Error('Symbol is required before downloading data');
+      }
+
       const response = await fetch('http://localhost:8000/api/training/download', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          symbol: trainingState.ppoSymbol || trainingState.sacSymbol,
+          symbol,
           start_date: trainingState.startDate,
           end_date: trainingState.endDate,
           // ALWAYS download ALL data sources - user selects at training time
@@ -298,6 +311,12 @@ function TabTraining() {
           enable_multi_asset: true,
           enable_macro: true,
           force_redownload: false,
+          ...(selectedAgent === INTRADAY_AGENT ? {
+            data_frequency: 'intraday',
+            interval: '15m',
+            benchmark_symbol: benchmarkSymbol,
+            benchmark_interval: '15m'
+          } : {})
         }),
       });
       
@@ -526,8 +545,12 @@ function TabTraining() {
       return;
     }
 
-    const targetAgent = (configPayload.agent_type || selectedAgent || 'PPO').toUpperCase();
-    const agentKey = targetAgent === 'SAC' ? 'SAC' : 'PPO';
+    const baseAgent = (configPayload.agent_type || selectedAgent || 'PPO').toUpperCase();
+    const intradayPreset =
+      (configPayload.training_settings?.data_frequency || '').toLowerCase() === 'intraday' &&
+      (configPayload.training_settings?.reward_mode || '').toLowerCase() === 'dsr';
+    const targetAgent = intradayPreset ? INTRADAY_AGENT : baseAgent;
+    const agentKey = resolveAgentType(targetAgent) === 'SAC' ? 'SAC' : 'PPO';
 
     if (configPayload.symbol) {
       if (agentKey === 'PPO') {
@@ -764,7 +787,12 @@ function TabTraining() {
       return;
     }
 
-    const targetAgent = (config.agent_type || selectedAgent || 'PPO').toUpperCase();
+    const baseAgent = (config.agent_type || selectedAgent || 'PPO').toUpperCase();
+    const isIntradayConfig =
+      (config.training_settings?.data_frequency || '').toLowerCase() === 'intraday' &&
+      (config.training_settings?.reward_mode || '').toLowerCase() === 'dsr';
+    const targetAgent = isIntradayConfig ? INTRADAY_AGENT : baseAgent;
+
     if (targetAgent !== selectedAgent) {
       setSelectedAgent(targetAgent);
     }
@@ -772,12 +800,12 @@ function TabTraining() {
     applyConfigToState(config);
 
     const hyper = config.hyperparameters
-      || (targetAgent === 'SAC' ? config.sac_hyperparameters : config.ppo_hyperparameters)
+      || (resolveAgentType(targetAgent) === 'SAC' ? config.sac_hyperparameters : config.ppo_hyperparameters)
       || {};
 
     const lr = hyper.learning_rate !== undefined ? hyper.learning_rate : 'unchanged';
     const episodes = hyper.episodes !== undefined ? hyper.episodes : 'unchanged';
-    const rewardKey = targetAgent === 'SAC' ? 'vol_penalty' : 'risk_penalty';
+    const rewardKey = resolveAgentType(targetAgent) === 'SAC' ? 'vol_penalty' : 'risk_penalty';
     const rewardVal = hyper[rewardKey] !== undefined ? hyper[rewardKey] : 'unchanged';
 
     const features = config.features || {};
@@ -1096,6 +1124,7 @@ function TabTraining() {
           >
             <option value="PPO">PPO - Stock Trading</option>
             <option value="SAC">SAC - Leveraged ETF Trading</option>
+            <option value="SAC_INTRADAY_DSR">SAC + DSR (15m Intraday)</option>
           </select>
         </div>
         
@@ -1524,7 +1553,7 @@ function TabTraining() {
               </button>
             )}
 
-            {selectedAgent === 'SAC' && (
+            {(selectedAgent === 'SAC' || isIntradayAgent) && (
               <button
                 onClick={() => handleDeployToSAC()}
                 disabled={!canDeploySAC}
@@ -1569,7 +1598,11 @@ function TabTraining() {
                   : ''}
               >
                 <span style={{ fontSize: '18px' }}>🚀</span>
-                <span>{deployingAgent ? 'Deploying to Live...' : `Deploy ${selectedModel?.symbol || trainingState.sacSymbol} to SAC Live (Paper)`}</span>
+                <span>
+                  {deployingAgent
+                    ? 'Deploying to Live...'
+                    : `Deploy ${selectedModel?.symbol || trainingState.sacSymbol} to ${isIntradayAgent ? 'SAC Intraday' : 'SAC'} Live (Paper)`}
+                </span>
               </button>
             )}
           </div>

@@ -46,6 +46,7 @@ export const useTrainingState = () => {
 
   // ===== SAC Hyperparameters (Leveraged ETF Trading) =====
   const [sacSymbol, setSacSymbol] = useState('TNA');
+  const [sacBenchmarkSymbol, setSacBenchmarkSymbol] = useState('IWM');
   const [sacLearningRate, setSacLearningRate] = useState(0.0003);
   const [sacEntropy, setSacEntropy] = useState(0.2);
   const [sacBatchSize, setSacBatchSize] = useState(256);
@@ -123,25 +124,45 @@ export const useTrainingState = () => {
    * 
    * Returns JSON object ready to send to backend API
    */
+  const inferBenchmarkSymbol = (leveragedSymbol) => {
+    const symbol = (leveragedSymbol || '').toUpperCase();
+    if (symbol === 'TQQQ' || symbol === 'SQQQ') return 'QQQ';
+    if (symbol === 'UPRO' || symbol === 'SPXL') return 'SPY';
+    if (symbol === 'TNA' || symbol === 'TZA') return 'IWM';
+    if (symbol === 'TMF' || symbol === 'TMV') return 'TLT';
+    return 'SPY';
+  };
+
+  const parseEntropyCoef = (value) => {
+    if (typeof value === 'string' && value.toLowerCase() === 'auto') {
+      return 'auto';
+    }
+    const parsed = parseFloat(value);
+    return Number.isNaN(parsed) ? 0.2 : parsed;
+  };
+
   const buildTrainingConfig = (agentType) => {
+    const resolvedAgentType = agentType === 'SAC_INTRADAY_DSR' ? 'SAC' : agentType;
     const parsedAdxPeriod = parseInt(adxPeriod, 10);
     const finalAdxPeriod = Number.isNaN(parsedAdxPeriod) ? 14 : parsedAdxPeriod;
+    const parsedSacEpisodes = parseInt(sacEpisodes, 10);
+    const resolvedSacEpisodes = Number.isNaN(parsedSacEpisodes) ? 45000 : parsedSacEpisodes;
 
     const config = {
-      agent_type: agentType, // 'PPO' or 'SAC'
-      symbol: agentType === 'PPO' ? ppoSymbol : sacSymbol,
-      hyperparameters: agentType === 'PPO' ? {
+      agent_type: resolvedAgentType,
+      symbol: resolvedAgentType === 'PPO' ? ppoSymbol : sacSymbol,
+      hyperparameters: resolvedAgentType === 'PPO' ? {
         learning_rate: parseFloat(ppoLearningRate),
         gamma: parseFloat(ppoGamma),
-        batch_size: parseInt(ppoBatchSize),
+        batch_size: parseInt(ppoBatchSize, 10),
         risk_penalty: parseFloat(ppoRiskPenalty),
-        episodes: parseInt(ppoEpisodes)
+        episodes: parseInt(ppoEpisodes, 10)
       } : {
         learning_rate: parseFloat(sacLearningRate),
-        entropy_coef: parseFloat(sacEntropy),
-        batch_size: parseInt(sacBatchSize),
+        entropy_coef: parseEntropyCoef(sacEntropy),
+        batch_size: parseInt(sacBatchSize, 10),
         vol_penalty: parseFloat(sacVolPenalty),
-        episodes: parseInt(sacEpisodes)
+        episodes: resolvedSacEpisodes
       },
       features: {
         price: priceEnabled,
@@ -198,9 +219,28 @@ export const useTrainingState = () => {
         start_date: startDate,
         end_date: endDate,
         commission: parseFloat(commission),
-        optuna_trials: parseInt(optunaTrials)
+        optuna_trials: parseInt(optunaTrials, 10)
       }
     };
+
+    if (agentType === 'SAC_INTRADAY_DSR') {
+  const benchmark = sacBenchmarkSymbol || inferBenchmarkSymbol(sacSymbol);
+  config.hyperparameters.episodes = Math.max(resolvedSacEpisodes, 20000);
+      config.training_settings.data_frequency = 'intraday';
+      config.training_settings.interval = '15m';
+      config.training_settings.reward_mode = 'dsr';
+      config.training_settings.benchmark_symbol = benchmark;
+      config.training_settings.benchmark_interval = '15m';
+      config.training_settings.train_split = 0.8;
+      config.training_settings.episode_budget = 300;
+      config.training_settings.max_total_timesteps = 500000;
+      config.training_settings.dsr_config = {
+        decay: 0.97,
+        epsilon: 1e-9,
+        warmup_steps: 150,
+        clip_value: 4.0
+      };
+    }
 
     return config;
   };
@@ -211,15 +251,16 @@ export const useTrainingState = () => {
    * Returns: { valid: boolean, errors: string[] }
    */
   const validateConfig = (agentType) => {
+  const resolvedAgentType = agentType === 'SAC_INTRADAY_DSR' ? 'SAC' : agentType;
     const errors = [];
 
     // Validate hyperparameters
-    const lr = agentType === 'PPO' ? ppoLearningRate : sacLearningRate;
+    const lr = resolvedAgentType === 'PPO' ? ppoLearningRate : sacLearningRate;
     if (lr <= 0 || lr > 0.1) {
       errors.push('Learning rate must be between 0 and 0.1');
     }
 
-    const episodes = agentType === 'PPO' ? ppoEpisodes : sacEpisodes;
+    const episodes = resolvedAgentType === 'PPO' ? ppoEpisodes : sacEpisodes;
     if (episodes < 1000) {
       errors.push('Episodes must be at least 1000');
     }
@@ -239,6 +280,16 @@ export const useTrainingState = () => {
     // Validate Optuna trials
     if (optunaTrials < 10) {
       errors.push('Optuna trials must be at least 10');
+    }
+
+    if (agentType === 'SAC_INTRADAY_DSR') {
+      if (!sacSymbol) {
+        errors.push('Intraday SAC symbol is required');
+      }
+      const benchmark = sacBenchmarkSymbol || inferBenchmarkSymbol(sacSymbol);
+      if (!benchmark) {
+        errors.push('Benchmark symbol could not be determined for intraday SAC');
+      }
     }
 
     return {
@@ -262,12 +313,13 @@ export const useTrainingState = () => {
 
     // SAC defaults
     setSacSymbol('TNA');
-    setSacLearningRate(0.0003);
-    setSacEntropy(0.2);
-    setSacBatchSize(256);
-    setSacVolPenalty(-0.3);
-    setSacEpisodes(45000);
-    setSacRetrain('Weekly');
+  setSacLearningRate(0.0003);
+  setSacEntropy(0.2);
+  setSacBatchSize(256);
+  setSacVolPenalty(-0.3);
+  setSacEpisodes(45000);
+  setSacRetrain('Weekly');
+  setSacBenchmarkSymbol('IWM');
 
     // Training settings defaults
     setStartDate('2023-01-01');
@@ -307,7 +359,8 @@ export const useTrainingState = () => {
     ppoMaxPosition, setPpoMaxPosition,
 
     // SAC State
-    sacSymbol, setSacSymbol,
+  sacSymbol, setSacSymbol,
+  sacBenchmarkSymbol, setSacBenchmarkSymbol,
     sacLearningRate, setSacLearningRate,
     sacEntropy, setSacEntropy,
     sacBatchSize, setSacBatchSize,

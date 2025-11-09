@@ -34,7 +34,7 @@ import gym
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 
 class BaseTradingEnv(gym.Env, ABC):
@@ -57,7 +57,7 @@ class BaseTradingEnv(gym.Env, ABC):
         self,
         df: pd.DataFrame,
         initial_capital: float = 100000.0,
-        commission: float = 1.0,
+    commission: Union[float, Dict[str, float]] = 1.0,
         max_position_size: float = 1.0,
         normalize_obs: bool = True,
         history_config: Optional[Dict] = None
@@ -80,7 +80,15 @@ class BaseTradingEnv(gym.Env, ABC):
         
         # Trading parameters
         self.initial_capital = initial_capital
-        self.commission = commission
+        self._commission_config: Optional[Dict[str, float]] = None
+        self._commission_value: float = 0.0
+
+        if isinstance(commission, dict):
+            self._commission_config = {**commission}
+            self.commission = self._commission_config  # Preserve attribute for external access
+        else:
+            self._commission_value = float(commission)
+            self.commission = self._commission_value
         self.max_position_size = max_position_size
         self.normalize_obs = normalize_obs
         
@@ -399,23 +407,55 @@ class BaseTradingEnv(gym.Env, ABC):
             current_price: Current asset price
         """
         if action == 1:  # BUY
-            # Calculate max shares we can buy
-            max_buy_value = self.cash * self.max_position_size
-            max_shares = int((max_buy_value - self.commission) / current_price)
-            
+            spendable_cash = min(self.cash, self.cash * self.max_position_size)
+            if current_price <= 0 or spendable_cash <= 0:
+                return
+
+            max_shares = int(spendable_cash / current_price)
+            while max_shares > 0:
+                fee = self._calculate_commission(max_shares, current_price)
+                cost = max_shares * current_price + fee
+                if cost <= spendable_cash and cost <= self.cash:
+                    break
+                max_shares -= 1
+
             if max_shares > 0:
-                cost = max_shares * current_price + self.commission
-                self.cash -= cost
-                self.holdings += max_shares
+                fee = self._calculate_commission(max_shares, current_price)
+                total_cost = max_shares * current_price + fee
+                if total_cost <= self.cash:
+                    self.cash -= total_cost
+                    self.holdings += max_shares
         
         elif action == 2:  # SELL
-            # Sell all holdings
-            if self.holdings > 0:
-                revenue = self.holdings * current_price - self.commission
+            if self.holdings > 0 and current_price > 0:
+                fee = self._calculate_commission(self.holdings, current_price)
+                gross = self.holdings * current_price
+                fee = min(fee, gross)
+                revenue = gross - fee
                 self.cash += revenue
                 self.holdings = 0
         
         # action == 0 (HOLD) does nothing
+
+    def _calculate_commission(self, shares: int, price: float) -> float:
+        if shares <= 0 or price <= 0:
+            return 0.0
+
+        if self._commission_config:
+            rate = float(self._commission_config.get('per_share', 0.005))
+            min_fee = float(self._commission_config.get('min_fee', 1.0))
+            max_pct = float(self._commission_config.get('max_pct', 0.01))
+
+            fee = shares * rate
+            fee = max(fee, min_fee)
+            trade_value = shares * price
+            if max_pct > 0:
+                fee = min(fee, trade_value * max_pct)
+            fee = min(fee, trade_value)
+            return float(fee)
+
+        fee = self._commission_value
+        return float(fee) if fee > 0 else 0.0
     
     def _get_observation(self) -> np.ndarray:
         """
@@ -442,7 +482,11 @@ class BaseTradingEnv(gym.Env, ABC):
         ], dtype=np.float32)
         
         # Market features (from DataFrame)
-        market_features = self.df.iloc[self.current_step].values.astype(np.float32)
+        row = self.df.iloc[self.current_step].copy()
+        if 'position_context' in row.index:
+            position_ratio = self.position_value / self.total_value if self.total_value > 0 else 0.0
+            row['position_context'] = float(position_ratio)
+        market_features = row.values.astype(np.float32)
         
         history_features = self._get_history_features()
 
