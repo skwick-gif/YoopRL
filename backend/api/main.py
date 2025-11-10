@@ -22,6 +22,7 @@ import uuid
 import json
 import pandas as pd
 from datetime import datetime, timedelta
+from typing import Optional, Union
 import threading
 
 # Load environment variables from .env file
@@ -74,6 +75,32 @@ register_live_routes(app, db, live_agent_manager, model_manager, logger)
 # Global dictionary to track training sessions
 training_sessions = {}
 training_threads = {}
+
+
+def _format_duration(seconds: Optional[Union[float, int]]) -> Optional[str]:
+    """Format a duration (seconds) into HH:MM:SS, or None for invalid input."""
+    if seconds is None:
+        return None
+    if isinstance(seconds, (int, float)) and seconds >= 0:
+        total_seconds = int(seconds)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return None
+
+
+def _parse_int(value) -> Optional[int]:
+    """Safely convert a value to int, returning None on failure."""
+    if isinstance(value, bool):  # bool is subclass of int, preserve intent
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 # Health check endpoint
@@ -563,19 +590,84 @@ def get_training_progress(training_id):
         
         # Read progress from file (updated by TrainingProgressCallback)
         progress_file = Path('training_progress.json')
+        progress_data = None
         if progress_file.exists():
             try:
-                with open(progress_file, 'r') as f:
+                with open(progress_file, 'r', encoding='utf-8') as f:
                     progress_data = json.load(f)
-                
-                session['progress'] = progress_data.get('progress_pct', 0)
-                session['current_timestep'] = progress_data.get('timestep', 0)
-                session['current_reward'] = progress_data.get('episode_reward', 0.0)
-                session['episode_count'] = progress_data.get('episode_count', 0)
-            except:
-                pass
-        
-        return jsonify(session), 200
+            except Exception as exc:  # pragma: no cover - best effort logging
+                logger.warning(f"Failed to read training progress file: {exc}")
+
+        if progress_data:
+            progress_pct = progress_data.get('progress_pct')
+            if isinstance(progress_pct, (int, float)):
+                session['progress'] = float(progress_pct)
+
+            timestep = _parse_int(progress_data.get('timestep'))
+            if timestep is not None:
+                session['current_timestep'] = timestep
+
+            total_timesteps = _parse_int(progress_data.get('total_timesteps'))
+            if total_timesteps is not None:
+                session['total_timesteps'] = total_timesteps
+
+            episode_count = _parse_int(progress_data.get('episode_count'))
+            if episode_count is not None:
+                session['episode_count'] = episode_count
+                session['current_episode'] = episode_count
+
+            episode_reward = progress_data.get('episode_reward')
+            if isinstance(episode_reward, (int, float)):
+                reward_value = float(episode_reward)
+                session['current_reward'] = reward_value
+                session['avg_reward'] = reward_value
+
+            recent_loss = progress_data.get('recent_loss')
+            if isinstance(recent_loss, (int, float)):
+                session['recent_loss'] = float(recent_loss)
+
+        # Ensure episode tracking fields exist even before progress file populates
+        if 'current_episode' not in session:
+            session['current_episode'] = session.get('episode_count', 0)
+
+        # Resolve total episodes from training config when available
+        total_episodes = None
+        config = session.get('config') or {}
+        hyper = config.get('hyperparameters') or {}
+        total_episodes = _parse_int(hyper.get('episodes'))
+
+        if total_episodes is None:
+            ppo_hyper = config.get('ppo_hyperparameters') or {}
+            sac_hyper = config.get('sac_hyperparameters') or {}
+            total_episodes = (
+                _parse_int(ppo_hyper.get('episodes'))
+                or _parse_int(sac_hyper.get('episodes'))
+            )
+
+        if total_episodes is not None:
+            session['total_episodes'] = total_episodes
+
+        # Compute elapsed time and ETA estimates
+        elapsed_seconds = None
+        started_at_str = session.get('started_at')
+        if started_at_str:
+            try:
+                started_at_dt = datetime.fromisoformat(started_at_str)
+                elapsed_seconds = max(0.0, (datetime.now() - started_at_dt).total_seconds())
+            except ValueError:
+                elapsed_seconds = None
+
+        session['elapsed_time'] = _format_duration(elapsed_seconds)
+
+        progress_pct = session.get('progress')
+        if isinstance(progress_pct, (int, float)) and progress_pct > 0 and elapsed_seconds is not None:
+            eta_seconds = elapsed_seconds * (100.0 - progress_pct) / progress_pct
+            session['eta'] = _format_duration(eta_seconds)
+        else:
+            session['eta'] = None
+
+        response_payload = dict(session)
+        return jsonify(response_payload), 200
         
     except Exception as e:
         logger.error(f"Error getting training progress: {e}")

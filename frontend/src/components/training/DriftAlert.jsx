@@ -45,18 +45,53 @@ const DriftAlert = ({ driftData, onRetrain }) => {
     last_check
   } = driftData;
 
+  if (typeof severity !== 'string' || !severity.trim()) {
+    throw new Error('DriftAlert: severity is required');
+  }
+
+  if (!Array.isArray(affected_features) || affected_features.length === 0) {
+    throw new Error('DriftAlert: affected_features must be a non-empty array');
+  }
+
+  if (!drift_scores || typeof drift_scores !== 'object') {
+    throw new Error('DriftAlert: drift_scores object is required');
+  }
+
+  const thresholdValue = Number(threshold);
+  if (!Number.isFinite(thresholdValue)) {
+    throw new Error('DriftAlert: numeric threshold is required');
+  }
+
+  if (typeof recommendation !== 'string' || !recommendation.trim()) {
+    throw new Error('DriftAlert: recommendation text is required');
+  }
+
   // Map severity to colors
   const severityColors = {
+    low: '#4CAF50',
     medium: '#FFC107',
     high: '#FF9800',
     critical: '#ff6b6b'
   };
-
-  const severityColor = severityColors[severity] || '#FFC107';
+  const normalizedSeverity = severity.trim().toLowerCase();
+  const severityColor = severityColors[normalizedSeverity];
+  if (!severityColor) {
+    throw new Error(`DriftAlert: unsupported severity level "${severity}"`);
+  }
+  const severityLabel = normalizedSeverity.toUpperCase();
+  const featureList = affected_features;
 
   // Format last check date
   const formatDate = (dateString) => {
+    if (typeof dateString !== 'string' || !dateString.trim()) {
+      throw new Error('DriftAlert: last_check timestamp is required');
+    }
+
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) {
+      throw new Error('DriftAlert: invalid last_check timestamp');
+    }
+
     return date.toLocaleString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -74,7 +109,7 @@ const DriftAlert = ({ driftData, onRetrain }) => {
           <h3 style={styles.title}>Data Drift Detected</h3>
         </div>
         <span style={{...styles.severityBadge, backgroundColor: severityColor}}>
-          {severity.toUpperCase()}
+          {severityLabel}
         </span>
       </div>
 
@@ -85,11 +120,21 @@ const DriftAlert = ({ driftData, onRetrain }) => {
 
       {/* Affected Features */}
       <div style={styles.section}>
-        <h4 style={styles.sectionTitle}>Affected Features ({affected_features?.length || 0}):</h4>
+        <h4 style={styles.sectionTitle}>Affected Features ({featureList.length}):</h4>
         <div style={styles.featuresGrid}>
-          {affected_features?.map((feature, index) => {
-            const score = drift_scores?.[feature];
-            const isHighDrift = score > threshold * 1.5;
+          {featureList.map((feature, index) => {
+            if (typeof feature !== 'string' || !feature.trim()) {
+              throw new Error('DriftAlert: feature identifiers must be non-empty strings');
+            }
+
+            const rawScore = drift_scores[feature];
+            const numericScore = Number(rawScore);
+            if (!Number.isFinite(numericScore)) {
+              throw new Error(`DriftAlert: drift score missing for feature "${feature}"`);
+            }
+
+            const isHighDrift = numericScore > thresholdValue * 1.5;
+            const featureLabel = feature.trim().toUpperCase();
 
             return (
               <div 
@@ -99,12 +144,10 @@ const DriftAlert = ({ driftData, onRetrain }) => {
                   backgroundColor: isHighDrift ? '#ff6b6b' : '#FFC107'
                 }}
               >
-                <span style={styles.featureName}>{feature}</span>
-                {score && (
-                  <span style={styles.featureScore}>
-                    {score.toFixed(2)}
-                  </span>
-                )}
+                <span style={styles.featureName}>{featureLabel}</span>
+                <span style={styles.featureScore}>
+                  {numericScore.toFixed(2)}
+                </span>
               </div>
             );
           })}
@@ -115,12 +158,12 @@ const DriftAlert = ({ driftData, onRetrain }) => {
       <div style={styles.detailsSection}>
         <div style={styles.detailItem}>
           <span style={styles.detailLabel}>Drift Threshold:</span>
-          <span style={styles.detailValue}>{threshold?.toFixed(2) || 'N/A'}</span>
+          <span style={styles.detailValue}>{thresholdValue.toFixed(2)}</span>
         </div>
         <div style={styles.detailItem}>
           <span style={styles.detailLabel}>Last Check:</span>
           <span style={styles.detailValue}>
-            {last_check ? formatDate(last_check) : 'N/A'}
+            {formatDate(last_check)}
           </span>
         </div>
       </div>

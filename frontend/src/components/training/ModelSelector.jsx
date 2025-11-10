@@ -39,6 +39,53 @@ const normalizeAgentType = (value) => {
   return upper === 'SAC_INTRADAY_DSR' ? 'SAC' : upper;
 };
 
+const requireString = (value, message) => {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(message);
+  }
+  return value.trim();
+};
+
+const requireFiniteNumber = (value, message) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    throw new Error(message);
+  }
+  return num;
+};
+
+const formatDecimal = (value, digits = 2, message = 'ModelSelector: expected numeric value') => {
+  const num = requireFiniteNumber(value, message);
+  return num.toFixed(digits);
+};
+
+const formatPercent = (value, digits = 2, { showPlus = false, message = 'ModelSelector: expected numeric percent' } = {}) => {
+  const num = requireFiniteNumber(value, message);
+  const prefix = showPlus && num >= 0 ? '+' : '';
+  return `${prefix}${num.toFixed(digits)}%`;
+};
+
+const formatInteger = (value, message = 'ModelSelector: expected integer value') => {
+  const num = requireFiniteNumber(value, message);
+  return Math.round(num).toLocaleString();
+};
+
+const formatDateTime = (dateString, message = 'ModelSelector: expected valid datetime') => {
+  const dateValue = requireString(dateString, message);
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(message);
+  }
+
+  return date.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+};
+
 const ModelSelector = ({ onModelSelect, agentType }) => {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(null);
@@ -85,17 +132,6 @@ const ModelSelector = ({ onModelSelect, agentType }) => {
   };
 
   // Format date for display
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-
   return (
     <div style={styles.container}>
       <label style={styles.label}>Select Trained Model:</label>
@@ -115,11 +151,21 @@ const ModelSelector = ({ onModelSelect, agentType }) => {
           style={styles.dropdown}
         >
           <option value="">-- Select Model --</option>
-          {models.map(model => (
-            <option key={model.model_id} value={model.model_id}>
-              {`${model.agent_type} - ${model.symbol} - ${model.version} - Sharpe: ${model.sharpe_ratio.toFixed(2)} - ${formatDate(model.created_at)}`}
-            </option>
-          ))}
+          {models.map(model => {
+            const optionId = requireString(model.model_id, 'ModelSelector: missing model_id');
+            const optionAgent = requireString(model.agent_type, 'ModelSelector: missing agent_type');
+            const optionSymbol = requireString(model.symbol, 'ModelSelector: missing symbol');
+            const optionVersion = requireString(model.version, 'ModelSelector: missing version');
+            const optionSharpe = formatDecimal(model.sharpe_ratio, 2, 'ModelSelector: missing Sharpe ratio');
+            const createdSource = model.created_at ?? model.created;
+            const optionDate = formatDateTime(createdSource, 'ModelSelector: missing created date');
+
+            return (
+              <option key={optionId} value={optionId}>
+                {`${optionAgent} - ${optionSymbol} - ${optionVersion} - Sharpe: ${optionSharpe} - ${optionDate}`}
+              </option>
+            );
+          })}
         </select>
       )}
       
@@ -129,35 +175,35 @@ const ModelSelector = ({ onModelSelect, agentType }) => {
           <div style={styles.detailsGrid}>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Agent Type:</span>
-              <span style={styles.detailValue}>{selectedModel.agent_type}</span>
+              <span style={styles.detailValue}>{requireString(selectedModel.agent_type, 'ModelSelector: missing agent_type')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Symbol:</span>
-              <span style={styles.detailValue}>{selectedModel.symbol}</span>
+              <span style={styles.detailValue}>{requireString(selectedModel.symbol, 'ModelSelector: missing symbol')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Version:</span>
-              <span style={styles.detailValue}>{selectedModel.version}</span>
+              <span style={styles.detailValue}>{requireString(selectedModel.version, 'ModelSelector: missing version')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Episodes:</span>
-              <span style={styles.detailValue}>{selectedModel.episodes.toLocaleString()}</span>
+              <span style={styles.detailValue}>{formatInteger(selectedModel.episodes, 'ModelSelector: missing episodes')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Sharpe Ratio:</span>
-              <span style={styles.detailValue}>{selectedModel.sharpe_ratio.toFixed(2)}</span>
+              <span style={styles.detailValue}>{formatDecimal(selectedModel.sharpe_ratio, 2, 'ModelSelector: missing Sharpe ratio')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Total Return:</span>
-              <span style={styles.detailValue}>{selectedModel.total_return.toFixed(2)}%</span>
+              <span style={styles.detailValue}>{formatPercent(selectedModel.total_return, 2, { showPlus: true, message: 'ModelSelector: missing total return' })}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>Created:</span>
-              <span style={styles.detailValue}>{formatDate(selectedModel.created_at)}</span>
+              <span style={styles.detailValue}>{formatDateTime(selectedModel.created_at ?? selectedModel.created, 'ModelSelector: missing created date')}</span>
             </div>
             <div style={styles.detailItem}>
               <span style={styles.detailLabel}>File Path:</span>
-              <span style={styles.detailValueMono}>{selectedModel.file_path}</span>
+              <span style={styles.detailValueMono}>{requireString(selectedModel.file_path, 'ModelSelector: missing file path')}</span>
             </div>
           </div>
         </div>
