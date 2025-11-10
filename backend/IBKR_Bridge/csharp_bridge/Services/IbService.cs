@@ -239,6 +239,46 @@ public class IbService
                 Currency = "USD"
             };
 
+            // Best-effort enrichment: resolve contract details to get ConId and primary exchange.
+            try
+            {
+                var details = await GetContractDetails(symbol, secType, exchange);
+                if (details != null)
+                {
+                    if (details.TryGetValue("conId", out var conIdObj))
+                    {
+                        var conIdProp = contract.GetType().GetProperty("ConId") ?? contract.GetType().GetProperty("conId");
+                        if (conIdProp != null && conIdProp.CanWrite && conIdObj != null)
+                        {
+                            conIdProp.SetValue(contract, Convert.ChangeType(conIdObj, conIdProp.PropertyType));
+                        }
+                    }
+
+                    if (details.TryGetValue("primaryExchange", out var primaryExchangeObj) && primaryExchangeObj is string primaryExchange && !string.IsNullOrWhiteSpace(primaryExchange))
+                    {
+                        var primaryExchangeProp = contract.GetType().GetProperty("PrimaryExchange") ?? contract.GetType().GetProperty("primaryExchange");
+                        if (primaryExchangeProp != null && primaryExchangeProp.CanWrite)
+                        {
+                            primaryExchangeProp.SetValue(contract, primaryExchange);
+                        }
+                    }
+                }
+            }
+            catch (Exception detailEx)
+            {
+                _logger.LogDebug(detailEx, "Contract enrichment skipped for {Symbol}", symbol);
+            }
+
+            try
+            {
+                // Request delayed data to support accounts without live subscriptions.
+                client.Request.RequestMarketDataType(MarketDataType.Delayed);
+            }
+            catch (Exception marketDataTypeEx)
+            {
+                _logger.LogDebug(marketDataTypeEx, "RequestMarketDataType fallback failed for {Symbol}", symbol);
+            }
+
             var ticks = new List<object>();
 
             var sub = client.Service
@@ -246,8 +286,9 @@ public class IbService
                 .OfTickClass(selector => selector.PriceTick)
                 .Subscribe(pt =>
                 {
-                    // collect basic tick info
-                    ticks.Add(new {
+                    if (pt.Price <= 0) return;
+                    ticks.Add(new
+                    {
                         RequestId = pt.RequestId,
                         TickType = pt.TickType.ToString(),
                         Price = pt.Price,
@@ -258,6 +299,8 @@ public class IbService
             await Task.Delay(duration);
 
             sub.Dispose();
+
+            _logger.LogInformation("Market data request complete: Symbol={Symbol}, Ticks={Count}", symbol, ticks.Count);
 
             return ticks;
         }
@@ -373,6 +416,44 @@ public class IbService
                 Exchange = exchange,
                 Currency = "USD"
             };
+
+            try
+            {
+                var details = await GetContractDetails(symbol, secType, exchange);
+                if (details != null)
+                {
+                    if (details.TryGetValue("conId", out var conIdObj))
+                    {
+                        var conIdProp = contract.GetType().GetProperty("ConId") ?? contract.GetType().GetProperty("conId");
+                        if (conIdProp != null && conIdProp.CanWrite && conIdObj != null)
+                        {
+                            conIdProp.SetValue(contract, Convert.ChangeType(conIdObj, conIdProp.PropertyType));
+                        }
+                    }
+
+                    if (details.TryGetValue("primaryExchange", out var primaryExchangeObj) && primaryExchangeObj is string primaryExchange && !string.IsNullOrWhiteSpace(primaryExchange))
+                    {
+                        var primaryExchangeProp = contract.GetType().GetProperty("PrimaryExchange") ?? contract.GetType().GetProperty("primaryExchange");
+                        if (primaryExchangeProp != null && primaryExchangeProp.CanWrite)
+                        {
+                            primaryExchangeProp.SetValue(contract, primaryExchange);
+                        }
+                    }
+                }
+            }
+            catch (Exception detailEx)
+            {
+                _logger.LogDebug(detailEx, "Contract enrichment skipped for {Symbol}", symbol);
+            }
+
+            try
+            {
+                client.Request.RequestMarketDataType(MarketDataType.Delayed);
+            }
+            catch (Exception marketDataTypeEx)
+            {
+                _logger.LogDebug(marketDataTypeEx, "RequestMarketDataType fallback failed for {Symbol}", symbol);
+            }
 
             var prices = new List<PricePoint>();
             var lastPrice = 0.0;

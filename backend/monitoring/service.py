@@ -92,7 +92,7 @@ def _build_agent_snapshot() -> Dict[str, Any]:
     """Generate agent status summary for monitoring endpoints."""
 
     statuses_raw = live_agent_manager.get_all_status()
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
 
     formatted_statuses: List[Dict[str, Any]] = []
     running = 0

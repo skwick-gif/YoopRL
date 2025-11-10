@@ -33,9 +33,11 @@ Wiring:
 
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Any, ClassVar, Union
-from datetime import datetime
+from datetime import datetime, UTC
 import json
 from copy import deepcopy
+
+from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
 
 
 @dataclass
@@ -306,6 +308,7 @@ class TrainingSettings:
     reward_mode: Optional[str] = None
     train_split: float = 0.8
     dsr_config: Dict[str, Any] = field(default_factory=dict)
+    intraday_enabled: bool = False
     
     def validate(self) -> List[str]:
         """Validate training settings."""
@@ -366,6 +369,7 @@ class TrainingSettings:
             errors.append("Total timesteps cannot exceed max total timesteps")
 
         frequency = (self.data_frequency or '').lower()
+        intraday_flag = bool(self.intraday_enabled)
         if frequency and frequency not in {'daily', 'intraday', '15m', '15min'}:
             errors.append("data_frequency must be 'daily' or an intraday option ('intraday', '15m')")
 
@@ -378,6 +382,10 @@ class TrainingSettings:
         interval_lower = (self.interval or '').lower()
         if frequency in {'intraday', '15m', '15min'} and interval_lower not in {'15m', '15min'}:
             errors.append("Intraday modes currently require interval='15m'")
+        if intraday_flag and interval_lower not in {'15m', '15min'}:
+            errors.append("intraday_enabled requires interval='15m'")
+        if intraday_flag and frequency not in {'intraday', '15m', '15min'}:
+            errors.append("intraday_enabled requires data_frequency set to an intraday value")
         
         return errors
 
@@ -423,16 +431,13 @@ class TrainingConfig:
             if not isinstance(self.training_settings, TrainingSettings):
                 self.training_settings = TrainingSettings(**asdict(self.training_settings))
 
-            if not self.training_settings.data_frequency:
-                self.training_settings.data_frequency = 'intraday'
-            if not self.training_settings.interval:
-                self.training_settings.interval = '15m'
+            self.training_settings.data_frequency = 'intraday'
+            self.training_settings.interval = '15m'
             if not self.training_settings.reward_mode:
                 self.training_settings.reward_mode = 'dsr'
             if not self.training_settings.benchmark_symbol:
                 self.training_settings.benchmark_symbol = _infer_benchmark_symbol(self.symbol)
-            if not self.training_settings.benchmark_interval:
-                self.training_settings.benchmark_interval = '15m'
+            self.training_settings.benchmark_interval = '15m'
             if not self.training_settings.dsr_config:
                 self.training_settings.dsr_config = {
                     'decay': 0.94,
@@ -442,6 +447,9 @@ class TrainingConfig:
                 }
             if self.training_settings.optuna_trials < 1:
                 self.training_settings.optuna_trials = 0
+            self.training_settings.intraday_enabled = True
+        else:
+            self.training_settings.intraday_enabled = bool(self.training_settings.intraday_enabled)
 
         # Normalize feature configuration
         if isinstance(self.features, dict):
@@ -473,6 +481,14 @@ class TrainingConfig:
         supported_agents = {'PPO', 'SAC', 'SAC_INTRADAY_DSR'}
         if self.agent_type not in supported_agents:
             errors['agent_type'].append("Agent type must be one of: PPO, SAC, SAC_INTRADAY_DSR")
+
+        symbol_upper = (self.symbol or '').upper()
+
+        if self.agent_type == 'SAC_INTRADAY_DSR' and symbol_upper not in ALLOWED_INTRADAY_SYMBOLS:
+            allowed_list = ', '.join(sorted(ALLOWED_INTRADAY_SYMBOLS))
+            errors['training_settings'].append(
+                f"Intraday agent symbol must be one of: {allowed_list}"
+            )
         
         # Validate hyperparameters
         canonical_agent = self.agent_type if self.agent_type != 'SAC_INTRADAY_DSR' else 'SAC'
@@ -483,7 +499,7 @@ class TrainingConfig:
             errors['hyperparameters'] = self.sac_hyperparameters.validate()
         
         # Validate training settings
-        errors['training_settings'] = self.training_settings.validate()
+        errors['training_settings'] += self.training_settings.validate()
         
         return errors
     
@@ -719,7 +735,7 @@ def get_sac_intraday_dsr_preset(symbol: str, benchmark_symbol: Optional[str] = N
         episodes=250_000
     )
 
-    now_str = datetime.utcnow().strftime('%Y-%m-%d')
+    now_str = datetime.now(UTC).strftime('%Y-%m-%d')
 
     training_settings = TrainingSettings(
         start_date='2018-01-01',

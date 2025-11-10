@@ -16,6 +16,30 @@ from database.db_manager import DatabaseManager
 INTRADAY_ROOT = Path("data/intraday")
 NY_TZ = pytz.timezone("America/New_York")
 SUPPORTED_INTERVALS = {"15m"}
+ALLOWED_INTRADAY_SYMBOLS = frozenset({
+    "SPY",
+    "QQQ",
+    "IWM",
+    "TNA",
+    "UPRO",
+    "TQQQ",
+    "DIA",
+    "UDOW",
+})
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return (symbol or "").upper()
+
+
+def _validate_intraday_symbol(symbol: str) -> str:
+    normalized = _normalize_symbol(symbol)
+    if normalized not in ALLOWED_INTRADAY_SYMBOLS:
+        allowed = ", ".join(sorted(ALLOWED_INTRADAY_SYMBOLS))
+        raise ValueError(
+            f"Intraday downloads currently support only {{{allowed}}}; received '{symbol}'."
+        )
+    return normalized
 
 
 @dataclass
@@ -27,10 +51,11 @@ class IntradayStoreConfig:
     def __post_init__(self) -> None:
         if self.interval not in SUPPORTED_INTERVALS:
             raise ValueError(f"Unsupported interval {self.interval}. Supported: {SUPPORTED_INTERVALS}")
+        self.symbol = _validate_intraday_symbol(self.symbol)
 
     @property
     def base_dir(self) -> Path:
-        path = self.root / self.symbol.upper() / self.interval
+        path = self.root / self.symbol / self.interval
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -217,7 +242,8 @@ def build_intraday_dataset(
     start: Optional[str | date | datetime] = None,
     end: Optional[str | date | datetime] = None
 ) -> pd.DataFrame:
-    primary, benchmark = symbols
+    primary, benchmark = (_validate_intraday_symbol(sym) for sym in symbols)
+
     primary_df = load_intraday_data(primary, interval=interval, start=start, end=end)
     benchmark_df = load_intraday_data(benchmark, interval=interval, start=start, end=end)
     primary_prefixed = _prefix_columns(primary_df, primary.lower())
@@ -243,7 +269,6 @@ def _prefix_columns(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 def get_intraday_date_bounds(symbol: str, interval: str = "15m") -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Return earliest and latest session dates available for a symbol."""
-
     config = IntradayStoreConfig(symbol=symbol, interval=interval)
     db_manager = DatabaseManager()
     earliest = None

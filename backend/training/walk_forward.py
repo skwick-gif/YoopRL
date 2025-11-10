@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
@@ -267,7 +267,7 @@ def run_walk_forward_evaluation(
         "windows_failed": len(errors),
         "results": window_results,
         "errors": errors,
-        "created_at": datetime.utcnow().isoformat(),
+    "created_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -396,7 +396,7 @@ def run_walk_forward_training_pipeline(
         "benchmark": resolved_benchmark,
         "interval": interval,
         "runs": runs,
-        "created_at": datetime.utcnow().isoformat(),
+    "created_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -473,7 +473,7 @@ def _evaluate_single_window(
             "max_pct": float(commission_config.get("max_pct", 0.0)),
         },
         "reward_mode": reward_mode,
-        "created_at": datetime.utcnow().isoformat(),
+    "created_at": datetime.now(UTC).isoformat(),
     }
 
     file_stub = window.filename_stub(symbol)

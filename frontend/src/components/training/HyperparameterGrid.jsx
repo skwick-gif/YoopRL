@@ -15,6 +15,7 @@
  * Props:
  * - agentType: 'PPO' or 'SAC' - determines which form to show
  * - trainingState: Object with all state values and setters from useTrainingState hook
+ * - isIntraday: When true, render intraday-specific inputs and hints
  * 
  * Wiring:
  * - Each input uses value={trainingState.X} and onChange={trainingState.setX}
@@ -35,9 +36,59 @@ const headerRowStyle = {
   marginBottom: '12px'
 };
 
-function HyperparameterGrid({ agentType, trainingState, onLoadConfig }) {
+const INTRADAY_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'TNA', 'UPRO', 'TQQQ', 'DIA', 'UDOW'];
+const INTRADAY_BENCHMARKS = ['SPY', 'QQQ', 'IWM', 'DIA'];
+const SYMBOL_BENCHMARK_MAP = {
+  SPY: 'SPY',
+  QQQ: 'QQQ',
+  IWM: 'IWM',
+  DIA: 'DIA',
+  TNA: 'IWM',
+  UPRO: 'SPY',
+  TQQQ: 'QQQ',
+  UDOW: 'DIA',
+};
+
+function HyperparameterGrid({ agentType, trainingState, onLoadConfig, isIntraday = false }) {
+  const allowedIntradaySymbols = INTRADAY_SYMBOLS.join(', ');
+  const allowedBenchmarkSymbols = INTRADAY_BENCHMARKS.join(', ');
+
+  const handleSacSymbolChange = (value) => {
+    const upper = (value || '').toUpperCase();
+    trainingState.setSacSymbol(upper);
+
+    if (!isIntraday) {
+      return;
+    }
+
+    const suggestedBenchmark = SYMBOL_BENCHMARK_MAP[upper];
+    if (!suggestedBenchmark) {
+      return;
+    }
+
+    const currentBenchmark = (trainingState.sacBenchmarkSymbol || '').toUpperCase();
+    if (!currentBenchmark || currentBenchmark === suggestedBenchmark || !SYMBOL_BENCHMARK_MAP[currentBenchmark]) {
+      trainingState.setSacBenchmarkSymbol(suggestedBenchmark);
+    }
+  };
+
   return (
     <>
+      {isIntraday && (
+        <>
+          <datalist id="intraday-symbol-options">
+            {INTRADAY_SYMBOLS.map((symbol) => (
+              <option key={symbol} value={symbol} />
+            ))}
+          </datalist>
+          <datalist id="intraday-benchmark-options">
+            {INTRADAY_BENCHMARKS.map((symbol) => (
+              <option key={symbol} value={symbol} />
+            ))}
+          </datalist>
+        </>
+      )}
+
       {/* Show PPO form when PPO is selected */}
       {agentType === 'PPO' && (
         <Card style={{ marginBottom: '12px' }}>
@@ -53,7 +104,9 @@ function HyperparameterGrid({ agentType, trainingState, onLoadConfig }) {
                 type="text" 
                 className="param-input" 
                 value={trainingState.ppoSymbol}
-                onChange={(e) => trainingState.setPpoSymbol(e.target.value)}
+                onChange={(e) => trainingState.setPpoSymbol(e.target.value.toUpperCase())}
+                placeholder="e.g. AAPL, TSLA, GOOGL"
+                autoComplete="off"
                 title="Stock symbol to trade (e.g., AAPL, TSLA, GOOGL). This determines which stock the agent will learn to trade."
               />
             </ParamItem>
@@ -126,21 +179,57 @@ function HyperparameterGrid({ agentType, trainingState, onLoadConfig }) {
       {agentType === 'SAC' && (
         <Card style={{ marginBottom: '12px' }}>
           <div style={headerRowStyle}>
-            <div className="control-title">SAC Hyperparameters (ETF)</div>
+            <div className="control-title">
+              {isIntraday ? 'SAC + DSR Hyperparameters (15m Intraday)' : 'SAC Hyperparameters (ETF)'}
+            </div>
             {onLoadConfig && (
               <ConfigManager agentType="SAC" onLoadConfig={onLoadConfig} compact />
             )}
           </div>
+          {isIntraday && (
+            <div
+              style={{
+                marginBottom: '12px',
+                backgroundColor: '#353535',
+                borderRadius: '6px',
+                padding: '10px 12px',
+                fontSize: '13px',
+                color: '#d9e6ff'
+              }}
+            >
+              ⚡ Intraday mode supports symbols: {allowedIntradaySymbols}. Benchmark defaults to the paired index but can be adjusted here.
+            </div>
+          )}
           <div className="hyperparam-inline">
             <ParamItem label="Symbol">
               <input 
                 type="text" 
                 className="param-input" 
                 value={trainingState.sacSymbol}
-                onChange={(e) => trainingState.setSacSymbol(e.target.value)}
-                title="ETF symbol to trade (e.g., TNA, TQQQ, SPXL). This determines which leveraged ETF the agent will learn to trade."
+                onChange={(e) => handleSacSymbolChange(e.target.value)}
+                list={isIntraday ? 'intraday-symbol-options' : undefined}
+                placeholder={isIntraday ? 'e.g. SPY, QQQ, IWM' : 'e.g. TNA, TQQQ, SPXL'}
+                title={isIntraday
+                  ? `Intraday mode currently supports: ${allowedIntradaySymbols}.`
+                  : 'ETF symbol to trade (e.g., TNA, TQQQ, SPXL). This determines which leveraged ETF the agent will learn to trade.'
+                }
+                autoComplete="off"
               />
             </ParamItem>
+            {isIntraday && (
+              <ParamItem label="Benchmark (15m)">
+                <input
+                  type="text"
+                  className="param-input"
+                  value={trainingState.sacBenchmarkSymbol || ''}
+                  onChange={(e) => trainingState.setSacBenchmarkSymbol(e.target.value.toUpperCase())}
+                  list="intraday-benchmark-options"
+                  placeholder="Default derived automatically"
+                  title={`Benchmark symbol used for DSR calculations (allowed: ${allowedBenchmarkSymbols}).`}
+                  autoComplete="off"
+                />
+              </ParamItem>
+            )}
             <ParamItem label="LR">
               <input 
                 type="number" 

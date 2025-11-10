@@ -9,4 +9,5 @@ Date: November 8, 2025
 """
 
 from .agent_manager import AgentManager, agent_manager
+from .live_scheduler import LiveAgentScheduler
 from .live_trader import LiveTrader, LiveTraderConfig

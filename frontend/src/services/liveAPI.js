@@ -60,6 +60,22 @@ const liveAPI = {
   async emergencyStop() {
     return request('/api/live/emergency-stop', { method: 'POST' });
   },
+
+  async updateTradingHours(agentId, payload) {
+    return request(`/api/live/agents/${agentId}/trading-hours`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async fetchTicks(agentId, { duration = 20, secType = 'STK', exchange = 'SMART' } = {}) {
+    const params = new URLSearchParams({
+      duration: String(duration),
+      secType,
+      exchange,
+    });
+    return request(`/api/live/agents/${agentId}/ticks?${params.toString()}`);
+  },
 };
 
 export default liveAPI;

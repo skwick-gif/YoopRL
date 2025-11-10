@@ -760,6 +760,33 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_market_date_bounds(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Return earliest and latest dates available for daily market data."""
+
+        query = (
+            "SELECT MIN(datetime) AS min_date, MAX(datetime) AS max_date "
+            "FROM market_data WHERE symbol = ?"
+        )
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(query, (symbol.upper(),))
+            row = cursor.fetchone()
+            if not row or not row["min_date"] or not row["max_date"]:
+                return None
+
+            return {
+                "min_date": row["min_date"],
+                "max_date": row["max_date"],
+            }
+        except Exception as exc:
+            logger.error("Error retrieving market data bounds for %s: %s", symbol, exc)
+            return None
+        finally:
+            conn.close()
+
     def save_intraday_data(self, symbol: str, interval: str, df: 'pd.DataFrame') -> int:
         """Persist intraday OHLCV bars with session metadata."""
 

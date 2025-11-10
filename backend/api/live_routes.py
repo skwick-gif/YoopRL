@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import requests
+
 from flask import Blueprint, jsonify, request
 
 from execution import LiveTraderConfig
@@ -20,6 +22,22 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 _AGENT_MANAGER: Optional[AgentManager] = None
 _DB: Optional[DatabaseManager] = None
 _MODEL_MANAGER: Optional[ModelManager] = None
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _coerce_bool(value: Any) -> bool:
+    """Best-effort conversion of payload values to boolean flags."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    if value is None:
+        return False
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return bool(value)
 
 
 def register_live_routes(
@@ -128,6 +146,11 @@ def create_live_agent():
             'paper_trading': data.get('paper_trading'),
             'bridge_host': data.get('bridge_host'),
             'bridge_port': data.get('bridge_port'),
+            'allow_premarket': data.get('allow_premarket'),
+            'allow_afterhours': data.get('allow_afterhours'),
+            'data_frequency': data.get('data_frequency'),
+            'interval': data.get('interval'),
+            'benchmark_symbol': data.get('benchmark_symbol'),
             'features_used': data.get('features_used'),
             'features_config': data.get('features_config'),
             'normalizer_path': data.get('normalizer_path'),
@@ -137,9 +160,19 @@ def create_live_agent():
         overrides.update({k: v for k, v in scalar_overrides.items() if v is not None})
 
         if 'model_path' in overrides:
-            overrides['model_path'] = Path(overrides['model_path'])
+            model_override = Path(overrides['model_path'])
+            if not model_override.is_absolute():
+                model_override = (_PROJECT_ROOT / model_override).resolve()
+            else:
+                model_override = model_override.resolve()
+            overrides['model_path'] = model_override
         if 'normalizer_path' in overrides:
-            overrides['normalizer_path'] = Path(overrides['normalizer_path'])
+            normalizer_override = Path(overrides['normalizer_path'])
+            if not normalizer_override.is_absolute():
+                normalizer_override = (_PROJECT_ROOT / normalizer_override).resolve()
+            else:
+                normalizer_override = normalizer_override.resolve()
+            overrides['normalizer_path'] = normalizer_override
         if 'features_used' in overrides and isinstance(overrides['features_used'], str):
             overrides['features_used'] = [overrides['features_used']]
         if 'features_used' in overrides and not isinstance(overrides['features_used'], list):
@@ -157,7 +190,17 @@ def create_live_agent():
         if 'bridge_port' in overrides:
             overrides['bridge_port'] = int(overrides['bridge_port'])
         if 'paper_trading' in overrides:
-            overrides['paper_trading'] = bool(overrides['paper_trading'])
+            overrides['paper_trading'] = _coerce_bool(overrides['paper_trading'])
+        if 'allow_premarket' in overrides:
+            overrides['allow_premarket'] = _coerce_bool(overrides['allow_premarket'])
+        if 'allow_afterhours' in overrides:
+            overrides['allow_afterhours'] = _coerce_bool(overrides['allow_afterhours'])
+        if 'data_frequency' in overrides and overrides['data_frequency'] is not None:
+            overrides['data_frequency'] = str(overrides['data_frequency']).lower()
+        if 'interval' in overrides and overrides['interval'] is not None:
+            overrides['interval'] = str(overrides['interval']).lower()
+        if 'benchmark_symbol' in overrides and overrides['benchmark_symbol']:
+            overrides['benchmark_symbol'] = str(overrides['benchmark_symbol']).upper()
 
         agent_id = data.get('agent_id')
         if not agent_id:
@@ -175,6 +218,9 @@ def create_live_agent():
 
         _AGENT_MANAGER.create_agent(config=config, start_immediately=start_immediately)
         status = _AGENT_MANAGER.get_agent(agent_id).get_status()
+        started_flag = bool(status.get('is_running'))
+        if started_flag:
+            _AGENT_MANAGER.wake_agent(agent_id)
 
         def _serialize(obj):
             if isinstance(obj, Path):
@@ -201,7 +247,7 @@ def create_live_agent():
         return jsonify({
             'status': 'success',
             'agent_id': agent_id,
-            'started': start_immediately,
+            'started': started_flag,
             'agent': status,
         }), 201
 
@@ -219,10 +265,13 @@ def start_live_agent(agent_id):
         raise RuntimeError("Live routes not initialised with agent manager")
 
     try:
-        success = _AGENT_MANAGER.start_agent(agent_id)
+        success, reason = _AGENT_MANAGER.start_agent(agent_id)
         if not success:
-            return jsonify({'status': 'error', 'error': 'failed to start agent'}), 500
-        return jsonify({'status': 'success', 'agent_id': agent_id}), 200
+            error_message = reason or 'failed to start agent'
+            return jsonify({'status': 'error', 'error': error_message}), 500
+        _AGENT_MANAGER.wake_agent(agent_id)
+        status = _AGENT_MANAGER.get_agent(agent_id).get_status()
+        return jsonify({'status': 'success', 'agent_id': agent_id, 'agent': status}), 200
     except KeyError as exc:
         return jsonify({'status': 'error', 'error': str(exc)}), 404
 
@@ -245,8 +294,9 @@ def run_live_agent_once(agent_id):
         raise RuntimeError("Live routes not initialised with agent manager")
 
     try:
-        success = _AGENT_MANAGER.run_agent_once(agent_id)
-        return jsonify({'status': 'success' if success else 'error', 'agent_id': agent_id, 'ran': success}), 200
+        success, reason = _AGENT_MANAGER.run_agent_once(agent_id, force=True)
+        status = 'success' if success else ('skipped' if reason else 'error')
+        return jsonify({'status': status, 'agent_id': agent_id, 'ran': success, 'reason': reason}), 200
     except KeyError as exc:
         return jsonify({'status': 'error', 'error': str(exc)}), 404
 
@@ -261,6 +311,59 @@ def close_live_agent_position(agent_id):
         return jsonify({'status': 'success' if success else 'error', 'agent_id': agent_id}), 200
     except KeyError as exc:
         return jsonify({'status': 'error', 'error': str(exc)}), 404
+
+
+@_live_bp.route('/agents/<agent_id>/trading-hours', methods=['PATCH'])
+def update_trading_hours(agent_id: str):
+    if _AGENT_MANAGER is None:
+        raise RuntimeError("Live routes not initialised with agent manager")
+
+    try:
+        trader = _AGENT_MANAGER.get_agent(agent_id)
+    except KeyError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 404
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({'status': 'error', 'error': 'Invalid payload'}), 400
+
+    updated: Dict[str, bool] = {}
+
+    if 'allow_premarket' in payload:
+        flag = _coerce_bool(payload['allow_premarket'])
+        trader.allow_premarket = flag
+        trader.config.allow_premarket = flag
+        trader.config.extras = dict(trader.config.extras or {})
+        trader.config.extras['allow_premarket'] = flag
+        updated['allow_premarket'] = flag
+
+    if 'allow_afterhours' in payload:
+        flag = _coerce_bool(payload['allow_afterhours'])
+        trader.allow_afterhours = flag
+        trader.config.allow_afterhours = flag
+        trader.config.extras = dict(trader.config.extras or {})
+        trader.config.extras['allow_afterhours'] = flag
+        updated['allow_afterhours'] = flag
+
+    if not updated:
+        return jsonify({'status': 'error', 'error': 'No trading window fields provided'}), 400
+
+    if _DB is not None:
+        _DB.log_system_event(  # type: ignore[call-arg]
+            component='LIVE_DEPLOYMENT',
+            level='INFO',
+            message='Updated trading hours settings',
+            details={
+                'agent_id': agent_id,
+                'updates': updated,
+            },
+        )
+
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'updated': updated,
+        'agent': trader.get_status(),
+    }), 200
 
 
 @_live_bp.route('/agents/<agent_id>', methods=['DELETE'])
@@ -282,3 +385,56 @@ def emergency_stop_agents():
 
     _AGENT_MANAGER.emergency_stop()
     return jsonify({'status': 'success', 'message': 'All agents stopped'}), 200
+
+
+@_live_bp.route('/agents/<agent_id>/ticks', methods=['GET'])
+def get_agent_ticks(agent_id: str):
+    if _AGENT_MANAGER is None:
+        raise RuntimeError("Live routes not initialised with agent manager")
+
+    try:
+        trader = _AGENT_MANAGER.get_agent(agent_id)
+    except KeyError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 404
+    duration = request.args.get('duration', default=20, type=int)
+    duration = max(1, min(duration, 120))
+
+    sec_type = request.args.get('secType', default='STK')
+    exchange = request.args.get('exchange', default='SMART')
+
+    bridge_host = request.args.get('bridge_host') or getattr(trader.config, 'bridge_host', 'localhost') or 'localhost'
+    bridge_port = request.args.get('bridge_port') or getattr(trader.config, 'bridge_port', 5080) or 5080
+
+    try:
+        bridge_port = int(bridge_port)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'error': 'Invalid bridge_port value'}), 400
+
+    url = f"http://{bridge_host}:{bridge_port}/marketdata"
+    params = {
+        'symbol': trader.config.symbol,
+        'secType': sec_type,
+        'exchange': exchange,
+        'durationSeconds': duration,
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=3)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.Timeout:
+        return jsonify({'status': 'error', 'error': 'Bridge request timed out'}), 504
+    except requests.exceptions.RequestException as exc:
+        _LOGGER.debug("Bridge market data request failed: %s", exc)
+        return jsonify({'status': 'error', 'error': str(exc)}), 502
+    except ValueError:
+        return jsonify({'status': 'error', 'error': 'Bridge returned non-JSON payload'}), 502
+
+    ticks = payload if isinstance(payload, list) else payload.get('ticks', []) if isinstance(payload, dict) else []
+
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'symbol': trader.config.symbol,
+        'ticks': ticks,
+    }), 200

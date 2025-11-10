@@ -38,7 +38,7 @@ import BacktestResults from './training/BacktestResults';
 import DriftAlert from './training/DriftAlert';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
 import { useTrainingState } from '../hooks/useTrainingState';
-import { startTraining, checkDriftStatus, runBacktest } from '../services/trainingAPI';
+import { startTraining, checkDriftStatus, runBacktest, fetchTrainingDateRange } from '../services/trainingAPI';
 import liveAPI from '../services/liveAPI';
 
 function TabTraining() {
@@ -59,6 +59,17 @@ function TabTraining() {
   const INTRADAY_AGENT = 'SAC_INTRADAY_DSR';
   const resolveAgentType = (agent) => (agent === INTRADAY_AGENT ? 'SAC' : agent);
   const isIntradayAgent = selectedAgent === INTRADAY_AGENT;
+  const [intradayDefaultsApplied, setIntradayDefaultsApplied] = useState(false);
+  const INTRADAY_AGENT_DEFAULTS = {
+    symbol: 'TNA',
+    benchmark: 'IWM',
+    learningRate: 0.0003,
+    entropy: 0.2,
+    batchSize: 256,
+    volPenalty: -0.3,
+    episodes: 45000,
+    retrain: 'Weekly'
+  };
   
   // Backtest results
   const [backtestResults, setBacktestResults] = useState(null);
@@ -84,7 +95,10 @@ function TabTraining() {
       return;
     }
 
-    if ((selectedModel.agent_type || '').toUpperCase() !== agentType.toUpperCase()) {
+    const modelAgentType = resolveAgentType((selectedModel.agent_type || '').toUpperCase());
+    const requestedAgentType = resolveAgentType(agentType.toUpperCase());
+
+    if (modelAgentType !== requestedAgentType) {
       alert(`Selected model (${selectedModel.agent_type}) does not match ${agentType}. Choose a matching model from the list.`);
       return;
     }
@@ -212,7 +226,7 @@ function TabTraining() {
   const canDeploySAC =
     (selectedAgent === 'SAC' || isIntradayAgent) &&
     !!selectedModel &&
-    selectedModel.agent_type === 'SAC' &&
+    resolveAgentType(selectedModel.agent_type) === 'SAC' &&
     sharpeValue >= 0.5 &&
     !deployingAgent;
 
@@ -244,6 +258,78 @@ function TabTraining() {
     setSelectedModel(null);
     setBacktestResults(null);
   }, [selectedAgent]);
+
+  useEffect(() => {
+    if (!isIntradayAgent) {
+      setIntradayDefaultsApplied(false);
+      return;
+    }
+
+    if (intradayDefaultsApplied) {
+      return;
+    }
+
+    trainingState.setSacSymbol(INTRADAY_AGENT_DEFAULTS.symbol);
+    trainingState.setSacBenchmarkSymbol(INTRADAY_AGENT_DEFAULTS.benchmark);
+    trainingState.setSacLearningRate(INTRADAY_AGENT_DEFAULTS.learningRate);
+    trainingState.setSacEntropy(INTRADAY_AGENT_DEFAULTS.entropy);
+    trainingState.setSacBatchSize(INTRADAY_AGENT_DEFAULTS.batchSize);
+    trainingState.setSacVolPenalty(INTRADAY_AGENT_DEFAULTS.volPenalty);
+    trainingState.setSacEpisodes(INTRADAY_AGENT_DEFAULTS.episodes);
+    trainingState.setSacRetrain(INTRADAY_AGENT_DEFAULTS.retrain);
+
+    setIntradayDefaultsApplied(true);
+  }, [isIntradayAgent, intradayDefaultsApplied, trainingState]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+  const agentForSymbol = resolveAgentType(selectedAgent);
+  const rawSymbol = agentForSymbol === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
+  const symbol = (rawSymbol || '').trim().toUpperCase();
+
+    if (!symbol || symbol.length < 2) {
+      return undefined;
+    }
+
+    const loadDateBounds = async () => {
+      const result = await fetchTrainingDateRange({
+        symbol,
+        frequency: isIntradayAgent ? 'intraday' : 'daily',
+        interval: isIntradayAgent ? '15m' : undefined
+      });
+
+      if (cancelled) {
+        return;
+      }
+
+      if (!result?.success) {
+        if (result?.status === 'not_found' && isIntradayAgent) {
+          const message = `⚠️ No cached 15m data found for ${symbol}. Download training data to refresh SQL.`;
+          setDownloadMessage(message);
+          setTimeout(() => {
+            setDownloadMessage((current) => (current === message ? '' : current));
+          }, 9000);
+        } else if (result?.error && result?.status !== 'not_found') {
+          console.warn('Failed to resolve training date range:', result.error);
+        }
+        return;
+      }
+
+      if (result.start_date) {
+        trainingState.setStartDate(result.start_date);
+      }
+      if (result.end_date) {
+        trainingState.setEndDate(result.end_date);
+      }
+    };
+
+    loadDateBounds();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgent, trainingState.ppoSymbol, trainingState.sacSymbol, isIntradayAgent]);
 
   // Check for data drift on mount and periodically
   useEffect(() => {
@@ -554,9 +640,9 @@ function TabTraining() {
 
     if (configPayload.symbol) {
       if (agentKey === 'PPO') {
-        trainingState.setPpoSymbol(configPayload.symbol);
+        trainingState.setPpoSymbol(String(configPayload.symbol).toUpperCase());
       } else {
-        trainingState.setSacSymbol(configPayload.symbol);
+        trainingState.setSacSymbol(String(configPayload.symbol).toUpperCase());
       }
     }
 
@@ -778,6 +864,10 @@ function TabTraining() {
           trainingState.setSacMaxPosition(capped);
         }
       }
+    }
+
+    if (agentKey === 'SAC' && trainingSettings.benchmark_symbol) {
+      trainingState.setSacBenchmarkSymbol(String(trainingSettings.benchmark_symbol).toUpperCase());
     }
   };
 
@@ -1169,7 +1259,8 @@ function TabTraining() {
 
       {/* Hyperparameter Configuration */}
       <HyperparameterGrid 
-        agentType={selectedAgent}
+        agentType={resolveAgentType(selectedAgent)}
+        isIntraday={isIntradayAgent}
         trainingState={trainingState}
         onLoadConfig={handleLoadConfig}
       />

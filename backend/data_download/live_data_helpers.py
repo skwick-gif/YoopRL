@@ -4,7 +4,7 @@ Used for live trading dashboards and agent monitoring.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import pandas as pd
@@ -43,10 +43,14 @@ def next_fetch_time(base: Optional[datetime], interval_seconds: int) -> datetime
     Returns:
         Next aligned datetime
     """
-    reference = base or datetime.utcnow()
+    reference = base or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    else:
+        reference = reference.astimezone(UTC)
     reference = reference.replace(microsecond=0)
     
-    epoch = datetime(1970, 1, 1)
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
     elapsed = (reference - epoch).total_seconds()
     remainder = elapsed % interval_seconds
     

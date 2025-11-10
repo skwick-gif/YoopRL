@@ -38,13 +38,35 @@ function TabLiveTrading() {
   const [error, setError] = useState(null);
   const [pending, setPending] = useState(false);
   const [toast, setToast] = useState(null);
+  const [hoursUpdating, setHoursUpdating] = useState({});
+  const [streamingAgents, setStreamingAgents] = useState({});
 
   const fetchAgents = useCallback(async () => {
     try {
       setError(null);
       const result = await liveAPI.listAgents();
-      setAgents(result.agents || []);
-      return result.agents || [];
+      const rawAgents = result.agents || [];
+      const normalized = rawAgents.map((agent) => ({
+        ...agent,
+        allow_premarket: Boolean(agent.allow_premarket),
+        allow_afterhours: Boolean(agent.allow_afterhours),
+      }));
+      setAgents(normalized);
+      setStreamingAgents((prev) => {
+        const activeIds = new Set(normalized.map((agent) => agent.agent_id));
+        const prevKeys = Object.keys(prev);
+        const next = {};
+        prevKeys.forEach((agentId) => {
+          if (prev[agentId] && activeIds.has(agentId)) {
+            next[agentId] = true;
+          }
+        });
+        if (prevKeys.length === Object.keys(next).length && prevKeys.every((id) => next[id])) {
+          return prev;
+        }
+        return next;
+      });
+      return normalized;
     } catch (err) {
       setError(err.message || 'Failed to load agents');
     } finally {
@@ -147,6 +169,36 @@ function TabLiveTrading() {
     }
   }, [fetchAgents]);
 
+  const handleToggleTradingHours = useCallback(async (agentId, field, value, symbol) => {
+    setHoursUpdating((prev) => ({ ...prev, [agentId]: true }));
+    try {
+      await liveAPI.updateTradingHours(agentId, { [field]: value });
+      setAgents((prev) => prev.map((agent) => (
+        agent.agent_id === agentId
+          ? { ...agent, [field]: value }
+          : agent
+      )));
+      const label = field === 'allow_premarket' ? 'Pre-market' : 'After-hours';
+      setToast({
+        type: 'success',
+        message: `${value ? '✅' : '⏸️'} ${label} trading ${value ? 'enabled' : 'disabled'} for ${symbol}.`,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      setToast({
+        type: 'warning',
+        message: `⚠️ Failed to update trading hours: ${err.message || 'Unknown error'}`,
+        createdAt: Date.now(),
+      });
+    } finally {
+      setHoursUpdating((prev) => {
+        const next = { ...prev };
+        delete next[agentId];
+        return next;
+      });
+    }
+  }, [setToast]);
+
   const handleEmergencyStop = useCallback(async () => {
     try {
       setPending(true);
@@ -168,6 +220,23 @@ function TabLiveTrading() {
       setPending(false);
     }
   }, [fetchAgents]);
+
+  const handleToggleStreaming = useCallback((agentId, symbol) => {
+    const isActive = Boolean(streamingAgents[agentId]);
+    setStreamingAgents((prev) => {
+      if (isActive) {
+        const next = { ...prev };
+        delete next[agentId];
+        return next;
+      }
+      return { ...prev, [agentId]: true };
+    });
+    setToast({
+      type: isActive ? 'warning' : 'success',
+      message: `${isActive ? '🛑' : '📡'} Live data ${isActive ? 'stopped' : 'started'} for ${symbol}.`,
+      createdAt: Date.now(),
+    });
+  }, [streamingAgents, setToast]);
 
   const emptyState = useMemo(() => (
     <Card style={{ padding: '32px', textAlign: 'center' }}>
@@ -236,6 +305,7 @@ function TabLiveTrading() {
       ) : (
         agents.map((agent) => {
           const statusColor = agent.is_running ? '#3fb950' : '#8b949e';
+          const manualStreaming = Boolean(streamingAgents[agent.agent_id]);
           return (
             <Card key={agent.agent_id} style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -260,6 +330,25 @@ function TabLiveTrading() {
                 <Metric label="Last Check" value={agent.last_run_at ? new Date(agent.last_run_at).toLocaleString() : 'Unknown'} />
               </div>
 
+              {agent.last_error && (
+                <div style={{
+                  background: 'rgba(248, 81, 73, 0.1)',
+                  border: '1px solid rgba(248, 81, 73, 0.4)',
+                  color: '#f85149',
+                  padding: '10px 12px',
+                  borderRadius: '6px',
+                  fontSize: '12px',
+                }}>
+                  ⚠️ Last error: {agent.last_error}
+                </div>
+              )}
+
+              <TradingWindowControls
+                agent={agent}
+                isUpdating={Boolean(hoursUpdating[agent.agent_id])}
+                onToggle={(field, value) => handleToggleTradingHours(agent.agent_id, field, value, agent.symbol)}
+              />
+
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                 <Button disabled={pending} onClick={() => handleAction('run', agent.agent_id)}>Run Check</Button>
                 {agent.is_running ? (
@@ -268,9 +357,20 @@ function TabLiveTrading() {
                   </Button>
                 ) : (
                   <Button disabled={pending} onClick={() => handleAction('start', agent.agent_id)} style={{ background: '#3fb950' }}>
-                    Start
+                    Start Agent
                   </Button>
                 )}
+                <Button
+                  disabled={pending || agent.is_running}
+                  onClick={() => handleToggleStreaming(agent.agent_id, agent.symbol)}
+                  style={{ background: agent.is_running ? '#3fb950' : manualStreaming ? '#9e6cff' : '#1f6feb' }}
+                >
+                  {agent.is_running
+                    ? 'Live Data Active'
+                    : manualStreaming
+                      ? 'Stop Live Data'
+                      : 'Start Live Data'}
+                </Button>
                 <Button disabled={pending || agent.current_position === 0} onClick={() => handleAction('close', agent.agent_id)}>
                   Close Position
                 </Button>
@@ -278,6 +378,13 @@ function TabLiveTrading() {
                   Remove Agent
                 </Button>
               </div>
+
+              <LiveTickChart
+                agentId={agent.agent_id}
+                symbol={agent.symbol}
+                isRunning={agent.is_running}
+                forceStreaming={manualStreaming}
+              />
             </Card>
           );
         })
@@ -291,6 +398,185 @@ function Metric({ label, value }) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', background: '#161b22', padding: '12px', borderRadius: '6px' }}>
       <span style={{ color: '#8b949e', fontSize: '12px' }}>{label}</span>
       <span style={{ color: '#c9d1d9', fontWeight: 'bold' }}>{value}</span>
+    </div>
+  );
+}
+
+function TradingWindowControls({ agent, isUpdating, onToggle }) {
+  if (!agent) {
+    return null;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', background: '#161b22', padding: '12px', borderRadius: '6px' }}>
+      <span style={{ color: '#8b949e', fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Trading Session</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#c9d1d9', fontSize: '13px', cursor: isUpdating ? 'not-allowed' : 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={Boolean(agent.allow_premarket)}
+            disabled={isUpdating}
+            onChange={(e) => onToggle('allow_premarket', e.target.checked)}
+            style={{ cursor: isUpdating ? 'not-allowed' : 'pointer' }}
+          />
+          <span>Pre-market (07:00-09:30 ET)</span>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#c9d1d9', fontSize: '13px', cursor: isUpdating ? 'not-allowed' : 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={Boolean(agent.allow_afterhours)}
+            disabled={isUpdating}
+            onChange={(e) => onToggle('allow_afterhours', e.target.checked)}
+            style={{ cursor: isUpdating ? 'not-allowed' : 'pointer' }}
+          />
+          <span>After-hours (16:00-20:00 ET)</span>
+        </label>
+      </div>
+      <span style={{ color: '#6e7681', fontSize: '11px' }}>
+        Outside the selected windows automatic runs are skipped for intraday agents.
+      </span>
+    </div>
+  );
+}
+
+function LiveTickChart({ agentId, symbol, isRunning, forceStreaming }) {
+  const [series, setSeries] = useState([]);
+  const [updatedAt, setUpdatedAt] = useState(null);
+  const [error, setError] = useState(null);
+  const isActive = isRunning || forceStreaming;
+
+  const fetchTicks = useCallback(async () => {
+    const payload = await liveAPI.fetchTicks(agentId, { duration: 20 });
+    const container = Array.isArray(payload?.ticks)
+      ? payload.ticks
+      : Array.isArray(payload)
+        ? payload
+        : [];
+
+    const points = [];
+    container.forEach((tick) => {
+      const rawPrice = tick?.Price ?? tick?.price ?? tick?.lastPrice ?? tick?.close;
+      const price = Number(rawPrice);
+      if (!Number.isFinite(price)) {
+        return;
+      }
+      const rawTime = tick?.Time ?? tick?.time ?? tick?.timestamp;
+      const timestamp = rawTime ? new Date(rawTime) : new Date();
+      points.push({ price, time: timestamp });
+    });
+
+    const maxPoints = 80;
+    return points.slice(-maxPoints);
+  }, [agentId]);
+
+  useEffect(() => {
+    let timer;
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const points = await fetchTicks();
+        if (!active) {
+          return;
+        }
+        setSeries(points);
+        setUpdatedAt(new Date());
+        setError(null);
+      } catch (err) {
+        if (!active) {
+          return;
+        }
+        setError(err.message || 'Failed to load ticks');
+      }
+    };
+
+    if (!isActive) {
+      setSeries([]);
+      setUpdatedAt(null);
+      setError(null);
+      return undefined;
+    }
+
+    poll();
+    timer = setInterval(poll, 5000);
+
+    return () => {
+      active = false;
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [fetchTicks, isActive]);
+
+  const WIDTH = 320;
+  const HEIGHT = 120;
+  const PADDING = 12;
+
+  const chartData = useMemo(() => {
+    if (series.length < 2) {
+      return { path: '', min: null, max: null };
+    }
+
+    const prices = series.map((point) => point.price);
+    const minPrice = Math.min(...prices);
+    const maxPrice = Math.max(...prices);
+    const range = maxPrice - minPrice || Math.max(maxPrice * 0.001, 0.01);
+
+    const commands = series
+      .map((point, index) => {
+        const x = (index / (series.length - 1)) * (WIDTH - PADDING * 2) + PADDING;
+        const normalized = (point.price - minPrice) / range;
+        const y = HEIGHT - PADDING - normalized * (HEIGHT - PADDING * 2);
+        const op = index === 0 ? 'M' : 'L';
+        return `${op}${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(' ');
+
+    return { path: commands, min: minPrice, max: maxPrice };
+  }, [series]);
+
+  const lastPoint = series.length ? series[series.length - 1] : null;
+
+  return (
+    <div style={{ background: '#161b22', borderRadius: '6px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ color: '#8b949e', fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+          {symbol} Live Ticks
+        </span>
+        {updatedAt && isActive && (
+          <span style={{ color: '#6e7681', fontSize: '11px' }}>Updated {updatedAt.toLocaleTimeString()}</span>
+        )}
+      </div>
+
+      {!isActive && (
+        <div style={{ color: '#6e7681', fontSize: '12px' }}>Start the agent or live data streaming to view ticks.</div>
+      )}
+
+      {error && (
+        <div style={{ color: '#f85149', fontSize: '12px' }}>{error}</div>
+      )}
+
+      {chartData.path && isActive && !error && (
+        <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width="100%" height="120" style={{ background: 'transparent' }}>
+          <rect x="0" y="0" width={WIDTH} height={HEIGHT} fill="rgba(88, 166, 255, 0.06)" rx="8" ry="8" />
+          <path d={chartData.path} fill="none" stroke="#58a6ff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+
+      {(!chartData.path || series.length < 2) && isActive && !error && (
+        <div style={{ color: '#6e7681', fontSize: '12px' }}>Collecting ticks...</div>
+      )}
+
+      {lastPoint && (
+        <div style={{ display: 'flex', gap: '12px', color: '#c9d1d9', fontSize: '13px' }}>
+          <span><strong>Last:</strong> ${lastPoint.price.toFixed(2)}</span>
+          {chartData.min !== null && chartData.max !== null && (
+            <span>
+              <strong>Range:</strong> ${chartData.min.toFixed(2)} — ${chartData.max.toFixed(2)}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

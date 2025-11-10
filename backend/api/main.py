@@ -38,6 +38,7 @@ from utils.state_normalizer import StateNormalizer
 from execution import agent_manager as live_agent_manager
 from monitoring.routes import register_monitoring_routes
 from api.live_routes import register_live_routes
+from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
 
 # Setup logging
 logging.basicConfig(
@@ -142,6 +143,63 @@ def save_equity():
     except Exception as e:
         logger.error(f"Error saving equity point: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/training/date-range', methods=['GET'])
+def get_training_date_range():
+    """Return cached date bounds for requested training symbol."""
+
+    symbol = (request.args.get('symbol') or '').strip().upper()
+    frequency = (request.args.get('frequency') or 'daily').strip().lower()
+    interval = (request.args.get('interval') or '1d').strip().lower()
+
+    if not symbol:
+        return jsonify({
+            'status': 'error',
+            'error': 'Symbol is required'
+        }), 400
+
+    try:
+        bounds = None
+        source = 'market_data'
+
+        if frequency == 'intraday':
+            interval = interval or '15m'
+            bounds = db.get_intraday_session_bounds(symbol, interval)
+            source = 'intraday_market_data'
+        else:
+            bounds = db.get_market_date_bounds(symbol)
+            interval = '1d'
+
+        if not bounds:
+            return jsonify({
+                'status': 'not_found',
+                'symbol': symbol,
+                'frequency': frequency,
+                'interval': interval
+            }), 404
+
+        start_date = bounds.get('min_date') or bounds.get('start_date')
+        end_date = bounds.get('max_date') or bounds.get('end_date')
+
+        start = pd.to_datetime(start_date).date().isoformat() if start_date else None
+        end = pd.to_datetime(end_date).date().isoformat() if end_date else None
+
+        return jsonify({
+            'status': 'success',
+            'symbol': symbol,
+            'frequency': 'intraday' if frequency == 'intraday' else 'daily',
+            'interval': interval,
+            'start_date': start,
+            'end_date': end,
+            'source': source
+        }), 200
+    except Exception as exc:
+        logger.error('Failed to resolve training date range for %s: %s', symbol, exc)
+        return jsonify({
+            'status': 'error',
+            'error': str(exc)
+        }), 500
 
 
 @app.route('/api/equity/history', methods=['GET'])
@@ -381,6 +439,31 @@ def start_training():
     try:
         data = request.json
         
+        # Determine whether request targets intraday pipeline and validate symbol gating
+        training_settings = data.get('training_settings') or {}
+        agent_type = str(data.get('agent_type', '')).upper()
+        interval = str(training_settings.get('interval', '')).lower()
+        frequency = str(training_settings.get('data_frequency', '')).lower()
+        intraday_flag = bool(training_settings.get('intraday_enabled', False))
+        wants_intraday = any([
+            agent_type == 'SAC_INTRADAY_DSR',
+            intraday_flag,
+            interval in {'15m', '15min'},
+            frequency in {'intraday', '15m', '15min'},
+        ])
+
+        if wants_intraday:
+            symbol = str(data.get('symbol') or training_settings.get('symbol', '')).upper()
+            if symbol not in ALLOWED_INTRADAY_SYMBOLS:
+                allowed_list = ', '.join(sorted(ALLOWED_INTRADAY_SYMBOLS))
+                return jsonify({
+                    'status': 'error',
+                    'message': (
+                        f"Intraday training currently supports only the following symbols: {allowed_list}"
+                    ),
+                    'error': 'unsupported_intraday_symbol',
+                }), 400
+
         # Generate unique training ID
         training_id = str(uuid.uuid4())
         
@@ -430,6 +513,7 @@ def start_training():
         logger.error(f"Error starting training: {e}", exc_info=True)
         return jsonify({
             'status': 'error',
+            'message': str(e),
             'error': str(e)
         }), 500
 
@@ -787,28 +871,120 @@ def run_backtest_endpoint():
         if not model_path.exists():
             raise FileNotFoundError(f"Model not found: {model_path}")
         
+        metadata_path = model_path.with_name(f"{model_path.stem}_metadata.json")
+        model_metadata = None
+        if metadata_path.exists():
+            try:
+                with metadata_path.open('r', encoding='utf-8') as handle:
+                    model_metadata = json.load(handle)
+            except Exception as meta_exc:  # pragma: no cover - logging only
+                logger.warning(f"Failed to load metadata for %s: %s", model_path.name, meta_exc)
+
+        def _metadata_metrics(payload: dict | None) -> dict:
+            if not payload:
+                return {}
+            if isinstance(payload.get('metrics'), dict) and payload['metrics']:
+                return payload['metrics']
+
+            metric_map = {
+                'sharpe_ratio': ['sharpe_ratio'],
+                'sortino_ratio': ['sortino_ratio'],
+                'max_drawdown': ['max_drawdown'],
+                'win_rate': ['win_rate'],
+                'total_return': ['total_return'],
+                'final_portfolio_value': ['final_balance', 'final_portfolio_value'],
+                'num_trades': ['total_trades', 'num_trades'],
+            }
+
+            metrics = {}
+            for target, candidates in metric_map.items():
+                for key in candidates:
+                    if key in payload and payload[key] is not None:
+                        metrics[target] = payload[key]
+                        break
+
+            if 'avg_trade_return' not in metrics:
+                trade_history = payload.get('trade_history') or []
+                if isinstance(trade_history, list) and trade_history:
+                    try:
+                        metrics['avg_trade_return'] = sum(trade_history) / len(trade_history)
+                    except TypeError:
+                        pass
+
+            return metrics
+
+        def _is_intraday_request() -> bool:
+            agent_tag = str(agent_type or '').upper()
+            if 'INTRADAY' in agent_tag:
+                return True
+
+            data_freq = str(data.get('data_frequency', '')).lower()
+            interval_hint = str(data.get('interval', '')).lower()
+            if data_freq == 'intraday' or interval_hint in {'15m', '15min'}:
+                return True
+
+            if not model_metadata:
+                return False
+
+            settings = model_metadata.get('training_settings') or {}
+            if str(settings.get('data_frequency', '')).lower() == 'intraday':
+                return True
+            if str(settings.get('interval', '')).lower() in {'15m', '15min'}:
+                return True
+            if bool(settings.get('intraday_enabled')):
+                return True
+
+            reward_mode = str(settings.get('reward_mode', '')).lower()
+            return reward_mode == 'dsr'
+
+        if _is_intraday_request():
+            metrics_payload = _metadata_metrics(model_metadata)
+            if not metrics_payload:
+                return jsonify({
+                    'status': 'error',
+                    'error': 'Intraday model metadata missing metrics. Cannot provide backtest summary.'
+                }), 400
+
+            total_trades = metrics_payload.get('num_trades')
+            if total_trades is None and model_metadata is not None:
+                total_trades = model_metadata.get('total_trades')
+                if total_trades is None and isinstance(model_metadata.get('trade_history'), list):
+                    total_trades = len(model_metadata['trade_history'])
+
+            response_payload = {
+                'status': 'success',
+                'source': 'metadata',
+                'intraday': True,
+                'metrics': metrics_payload,
+                'total_trades': total_trades,
+                'results_file': None,
+                'message': 'Returned stored metrics for intraday model (backtest replay unavailable)'
+            }
+
+            if model_metadata is not None:
+                final_value = metrics_payload.get('final_portfolio_value')
+                if final_value is None:
+                    final_value = model_metadata.get('final_balance') or model_metadata.get('final_portfolio_value')
+                if final_value is not None:
+                    response_payload['final_portfolio_value'] = final_value
+
+            return jsonify(response_payload), 200
+
         # Load test data
         # TODO: Replace with actual data loading from SQL
         from training.train import load_data
-        
+
         logger.info(f"Loading test data for {symbol} ({start_date} to {end_date})...")
         _, test_data = load_data(symbol, start_date, end_date)
         
         logger.info(f"Running backtest on {model_path}...")
 
-        metadata_path = model_path.with_name(f"{model_path.stem}_metadata.json")
         commission_payload = None
-        if metadata_path.exists():
-            try:
-                with metadata_path.open('r', encoding='utf-8') as handle:
-                    model_metadata = json.load(handle)
-                commission_payload = (
-                    model_metadata.get('commission_config')
-                    or model_metadata.get('training_settings')
-                )
-            except Exception as meta_exc:  # pragma: no cover - logging only
-                logger.warning(f"Failed to read metadata for commission config: {meta_exc}")
-                commission_payload = None
+        if model_metadata is not None:
+            commission_payload = (
+                model_metadata.get('commission_config')
+                or model_metadata.get('training_settings')
+            )
         commission_payload = commission_payload or data.get('training_settings')
         
         # Run backtest

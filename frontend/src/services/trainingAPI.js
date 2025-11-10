@@ -32,6 +32,23 @@
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
+const toDateOnly = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return value.trim();
+  }
+
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+
+  return null;
+};
+
 /**
  * Start Training
  * 
@@ -354,6 +371,63 @@ export const checkDriftStatus = async (symbol = 'AAPL', agentType = 'PPO', days 
     return {
       success: false,
       drift_detected: false,
+      error: error.message
+    };
+  }
+};
+
+/**
+ * Fetch Cached Training Date Range
+ *
+ * @param {Object} params - Query parameters
+ * @param {string} params.symbol - Trading symbol to inspect
+ * @param {string} [params.frequency='daily'] - 'daily' or 'intraday'
+ * @param {string} [params.interval] - Interval hint (e.g., '15m' for intraday)
+ * @returns {Promise<Object>} { success, start_date, end_date, source }
+ */
+export const fetchTrainingDateRange = async ({ symbol, frequency = 'daily', interval } = {}) => {
+  if (!symbol) {
+    return {
+      success: false,
+      error: 'Symbol is required'
+    };
+  }
+
+  const params = new URLSearchParams({
+    symbol,
+    frequency
+  });
+
+  if (interval) {
+    params.append('interval', interval);
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/training/date-range?${params.toString()}`);
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok || data.status === 'error') {
+      return {
+        success: false,
+        status: data.status || 'error',
+        error: data.error || data.message || `Failed to fetch date range (HTTP ${response.status})`
+      };
+    }
+
+    return {
+      success: true,
+      status: data.status,
+      start_date: toDateOnly(data.start_date),
+      end_date: toDateOnly(data.end_date),
+      interval: data.interval,
+      frequency: data.frequency,
+      source: data.source
+    };
+  } catch (error) {
+    console.error('Error fetching date range:', error);
+    return {
+      success: false,
+      status: 'error',
       error: error.message
     };
   }

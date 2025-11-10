@@ -33,6 +33,7 @@ optuna>=3.0.0  # Hyperparameter optimization
 schedule>=1.2.0
 
 # IBKR Integration (Python adapter)
+PyQt6==6.7.0
 requests==2.31.0
 
 # Logging and Monitoring

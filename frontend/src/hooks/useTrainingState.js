@@ -29,6 +29,8 @@
 
 import { useState } from 'react';
 
+const ALLOWED_INTRADAY_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'TNA', 'UPRO', 'TQQQ', 'DIA', 'UDOW'];
+
 export const useTrainingState = () => {
   // ===== PPO Hyperparameters (Stock Trading) =====
   const [ppoSymbol, setPpoSymbol] = useState('AAPL');
@@ -129,6 +131,8 @@ export const useTrainingState = () => {
     if (symbol === 'TQQQ' || symbol === 'SQQQ') return 'QQQ';
     if (symbol === 'UPRO' || symbol === 'SPXL') return 'SPY';
     if (symbol === 'TNA' || symbol === 'TZA') return 'IWM';
+    if (symbol === 'UDOW') return 'DIA';
+    if (symbol === 'DIA') return 'DIA';
     if (symbol === 'TMF' || symbol === 'TMV') return 'TLT';
     return 'SPY';
   };
@@ -150,7 +154,7 @@ export const useTrainingState = () => {
 
     const config = {
       agent_type: resolvedAgentType,
-      symbol: resolvedAgentType === 'PPO' ? ppoSymbol : sacSymbol,
+      symbol: (resolvedAgentType === 'PPO' ? ppoSymbol : sacSymbol) || '',
       hyperparameters: resolvedAgentType === 'PPO' ? {
         learning_rate: parseFloat(ppoLearningRate),
         gamma: parseFloat(ppoGamma),
@@ -224,8 +228,10 @@ export const useTrainingState = () => {
     };
 
     if (agentType === 'SAC_INTRADAY_DSR') {
-  const benchmark = sacBenchmarkSymbol || inferBenchmarkSymbol(sacSymbol);
-  config.hyperparameters.episodes = Math.max(resolvedSacEpisodes, 20000);
+      const normalizedSymbol = (sacSymbol || '').toUpperCase();
+      const benchmark = (sacBenchmarkSymbol || inferBenchmarkSymbol(normalizedSymbol)).toUpperCase();
+      config.symbol = normalizedSymbol;
+      config.hyperparameters.episodes = Math.max(resolvedSacEpisodes, 20000);
       config.training_settings.data_frequency = 'intraday';
       config.training_settings.interval = '15m';
       config.training_settings.reward_mode = 'dsr';
@@ -240,6 +246,7 @@ export const useTrainingState = () => {
         warmup_steps: 150,
         clip_value: 4.0
       };
+  config.training_settings.intraday_enabled = true;
     }
 
     return config;
@@ -286,7 +293,11 @@ export const useTrainingState = () => {
       if (!sacSymbol) {
         errors.push('Intraday SAC symbol is required');
       }
-      const benchmark = sacBenchmarkSymbol || inferBenchmarkSymbol(sacSymbol);
+      const normalizedSymbol = (sacSymbol || '').toUpperCase();
+      if (normalizedSymbol && !ALLOWED_INTRADAY_SYMBOLS.includes(normalizedSymbol)) {
+        errors.push(`Intraday mode currently supports only: ${ALLOWED_INTRADAY_SYMBOLS.join(', ')}`);
+      }
+      const benchmark = sacBenchmarkSymbol || inferBenchmarkSymbol(normalizedSymbol);
       if (!benchmark) {
         errors.push('Benchmark symbol could not be determined for intraday SAC');
       }

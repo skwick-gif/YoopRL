@@ -40,7 +40,11 @@ from utils.state_normalizer import StateNormalizer
 from models.model_manager import ModelManager
 from config.training_config import TrainingConfig
 from evaluation.backtester import evaluate_trained_model
-from data_download.intraday_loader import METADATA_COLUMNS as INTRADAY_METADATA_COLUMNS, build_intraday_dataset
+from data_download.intraday_loader import (
+    METADATA_COLUMNS as INTRADAY_METADATA_COLUMNS,
+    ALLOWED_INTRADAY_SYMBOLS,
+    build_intraday_dataset,
+)
 from data_download.intraday_features import IntradayFeatureSpec, add_intraday_features
 from training.commission import resolve_commission_config
 from training.rewards.dsr_wrapper import DSRConfig, DSRRewardWrapper
@@ -128,6 +132,8 @@ def _is_intraday_mode(config_dict: Dict[str, Any]) -> bool:
         return True
 
     training_settings = config_dict.get('training_settings') or {}
+    if bool(training_settings.get('intraday_enabled')):
+        return True
     frequency = str(training_settings.get('data_frequency', '')).lower()
     if frequency in INTRADAY_FREQUENCY_FLAGS:
         return True
@@ -352,6 +358,7 @@ def _normalize_training_config(config: Any) -> Dict[str, Any]:
         training_settings = asdict(training_settings)
     else:
         training_settings = dict(training_settings)
+    training_settings['intraday_enabled'] = bool(training_settings.get('intraday_enabled', False))
     config_dict['training_settings'] = training_settings
 
     features_payload = _features_payload(config_dict.get('features'))
@@ -570,6 +577,10 @@ def _load_intraday_training_frames(
     symbol = config_dict.get('symbol', '').upper()
     if not symbol:
         raise ValueError("Intraday training requires a valid symbol")
+
+    if symbol not in ALLOWED_INTRADAY_SYMBOLS:
+        allowed_list = ', '.join(sorted(ALLOWED_INTRADAY_SYMBOLS))
+        raise ValueError(f"Intraday training currently supports only: {allowed_list}")
 
     training_settings = config_dict.get('training_settings') or {}
     benchmark_symbol = (
@@ -918,6 +929,7 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     interval = training_settings.get('interval', '1d')
     training_settings['interval'] = interval
     training_settings['data_frequency'] = training_settings.get('data_frequency', 'daily')
+    training_settings['intraday_enabled'] = False
 
     print(f"[INFO] Data frequency: daily (interval={interval})")
     print(f"   Training samples: {len(train_market)} | Test samples: {len(test_market)}")
@@ -1209,6 +1221,7 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
         'benchmark_symbol': benchmark_symbol,
         'interval': interval,
         'data_frequency': training_settings.get('data_frequency', 'daily'),
+    'intraday_enabled': bool(training_settings.get('intraday_enabled', False)),
         'reward_mode': reward_mode,
         'dsr_config': dsr_config_raw if reward_mode == 'dsr' else {},
         'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
@@ -1275,13 +1288,14 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     hyperparams = ctx['hyperparams']
     train_split = ctx['train_split']
 
-    allowed_symbols = {'TNA', 'TQQQ', 'UPRO'}
-    if symbol not in allowed_symbols:
-        raise ValueError("SAC_INTRADAY_DSR pipeline currently supports only TNA, TQQQ, or UPRO")
+    if symbol not in ALLOWED_INTRADAY_SYMBOLS:
+        allowed_list = ', '.join(sorted(ALLOWED_INTRADAY_SYMBOLS))
+        raise ValueError(f"SAC_INTRADAY_DSR pipeline currently supports only: {allowed_list}")
 
     training_settings['data_frequency'] = 'intraday'
     training_settings['interval'] = training_settings.get('interval', '15m') or '15m'
     training_settings['reward_mode'] = training_settings.get('reward_mode', 'dsr') or 'dsr'
+    training_settings['intraday_enabled'] = True
 
     reward_mode = training_settings['reward_mode'].lower()
     dsr_config_raw = training_settings.get('dsr_config') or {
@@ -1571,6 +1585,7 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         'benchmark_symbol': benchmark_symbol,
         'interval': interval,
         'data_frequency': 'intraday',
+    'intraday_enabled': True,
         'reward_mode': reward_mode,
         'dsr_config': dsr_config_raw,
         'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
