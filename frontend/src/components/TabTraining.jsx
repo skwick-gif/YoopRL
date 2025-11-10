@@ -557,11 +557,12 @@ function TabTraining() {
     }
 
     if (model.symbol) {
-      if (model.agent_type === 'PPO' && trainingState.setPpoSymbol) {
+      const resolvedModelAgent = resolveAgentType((model.agent_type || '').toUpperCase());
+      if (resolvedModelAgent === 'PPO' && trainingState.setPpoSymbol) {
         trainingState.setPpoSymbol(model.symbol);
       }
-      if (model.agent_type === 'SAC' && trainingState.setSacSymbol) {
-  trainingState.setSacSymbol(model.symbol);
+      if (resolvedModelAgent === 'SAC' && trainingState.setSacSymbol) {
+        trainingState.setSacSymbol(model.symbol);
       }
     }
 
@@ -1364,12 +1365,14 @@ function TabTraining() {
             transition: 'all 0.2s ease'
           }}
           onMouseEnter={(e) => {
-            e.target.style.transform = 'scale(1.1)';
-            e.target.style.boxShadow = '0 4px 12px rgba(74, 158, 255, 0.5)';
+            const target = e.currentTarget;
+            target.style.transform = 'scale(1.1)';
+            target.style.boxShadow = '0 4px 12px rgba(74, 158, 255, 0.5)';
           }}
           onMouseLeave={(e) => {
-            e.target.style.transform = 'scale(1)';
-            e.target.style.boxShadow = '0 2px 8px rgba(74, 158, 255, 0.3)';
+            const target = e.currentTarget;
+            target.style.transform = 'scale(1)';
+            target.style.boxShadow = '0 2px 8px rgba(74, 158, 255, 0.3)';
           }}
           title="Open Training Guide - Learn how to use this tab"
         >
@@ -1751,13 +1754,15 @@ function TabTraining() {
                 }}
                 onMouseOver={(e) => {
                   if (canDeployPPO) {
-                    e.target.style.transform = 'translateY(-2px)';
-                    e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
+                    const target = e.currentTarget;
+                    target.style.transform = 'translateY(-2px)';
+                    target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
                   }
                 }}
                 onMouseOut={(e) => {
-                  e.target.style.transform = 'translateY(0)';
-                  e.target.style.boxShadow = 'none';
+                  const target = e.currentTarget;
+                  target.style.transform = 'translateY(0)';
+                  target.style.boxShadow = 'none';
                 }}
                 title={!selectedModel
                   ? 'Select a model to deploy'
@@ -1800,13 +1805,15 @@ function TabTraining() {
                 }}
                 onMouseOver={(e) => {
                   if (canDeploySAC) {
-                    e.target.style.transform = 'translateY(-2px)';
-                    e.target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
+                    const target = e.currentTarget;
+                    target.style.transform = 'translateY(-2px)';
+                    target.style.boxShadow = '0 4px 12px rgba(35, 134, 54, 0.4)';
                   }
                 }}
                 onMouseOut={(e) => {
-                  e.target.style.transform = 'translateY(0)';
-                  e.target.style.boxShadow = 'none';
+                  const target = e.currentTarget;
+                  target.style.transform = 'translateY(0)';
+                  target.style.boxShadow = 'none';
                 }}
                 title={!selectedModel
                   ? 'Select a model to deploy'
@@ -1844,7 +1851,7 @@ function TabTraining() {
 
       {/* Models Comparison Table - Compare all trained models */}
       <ModelsComparisonTable 
-        agentType={selectedAgent}
+        agentType={resolveAgentType(selectedAgent)}
       />
     </div>
   );
