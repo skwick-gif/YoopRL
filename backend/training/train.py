@@ -26,7 +26,7 @@ from pandas.api.types import is_numeric_dtype
 import optuna
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
-import gym
+import gymnasium as gym
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -312,6 +312,72 @@ def _extract_history_config(features: dict) -> dict:
     return {key: features[key] for key in history_keys if key in features}
 
 
+def _print_training_banner(
+    requested_agent_type: str,
+    canonical_agent_type: str,
+    symbol: str,
+    training_settings: Dict[str, Any],
+    train_split: float,
+) -> None:
+    """Print a standardized training banner for both daily and intraday runs."""
+
+    date_range = (
+        f"{training_settings.get('start_date', 'N/A')} to {training_settings.get('end_date', 'N/A')}"
+    )
+
+    print(f"\n{'='*70}")
+    print(f">> Starting Training: {requested_agent_type} Agent (canonical: {canonical_agent_type})")
+    print(f"   Symbol: {symbol}")
+    print(f"   Date Range: {date_range}")
+    print(f"   Train/Test Split: {train_split:.2f}/{1-train_split:.2f}")
+    print(f"{'='*70}\n")
+
+
+def _normalize_training_config(config: Any) -> Dict[str, Any]:
+    """Normalize incoming config payload (dataclass, dict, or TrainingConfig) into primitives."""
+
+    if hasattr(config, 'to_dict'):
+        config_dict = config.to_dict()
+    elif is_dataclass(config):
+        config_dict = asdict(config)
+    else:
+        config_dict = dict(config)
+
+    requested_agent_type = str(config_dict.get('agent_type', 'PPO')).upper()
+    canonical_agent_type = _canonical_agent_type(requested_agent_type)
+    config_dict['agent_type'] = requested_agent_type
+
+    training_settings = config_dict.get('training_settings') or {}
+    if is_dataclass(training_settings):
+        training_settings = asdict(training_settings)
+    else:
+        training_settings = dict(training_settings)
+    config_dict['training_settings'] = training_settings
+
+    features_payload = _features_payload(config_dict.get('features'))
+    config_dict['features'] = features_payload
+
+    symbol = str(config_dict.get('symbol', '')).upper()
+    if not symbol:
+        raise ValueError("Training configuration must include a symbol")
+
+    train_split = _sanitize_train_split(training_settings.get('train_split', 0.8), default=0.8)
+    training_settings['train_split'] = train_split
+
+    hyperparams = _resolve_hyperparameters(config_dict)
+
+    return {
+        'config_dict': config_dict,
+        'training_settings': training_settings,
+        'features_payload': features_payload,
+        'symbol': symbol,
+        'requested_agent_type': requested_agent_type,
+        'canonical_agent_type': canonical_agent_type,
+        'hyperparams': hyperparams,
+        'train_split': train_split,
+    }
+
+
 class TrainingProgressCallback(BaseCallback):
     """
     Custom callback for logging training progress to JSON file.
@@ -580,13 +646,36 @@ def optimize_hyperparameters_with_optuna(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     
     agent_type = config_dict['agent_type'].upper()
+    intraday_mode = _is_intraday_mode(config_dict)
+    if intraday_mode:
+        raise ValueError("Optuna optimization is not supported for intraday pipelines.")
+
     base_hyperparams = _resolve_hyperparameters(config_dict)
     if base_hyperparams is None:
         base_hyperparams = {}
     initial_capital = config_dict['training_settings'].get('initial_capital')
     if initial_capital is None:
         initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
-    commission = config_dict['training_settings'].get('commission', 1.0)
+    training_settings = config_dict['training_settings']
+    commission_config = resolve_commission_config(training_settings)
+    max_position_size = float(training_settings.get('max_position_size', 1.0))
+    normalize_obs = bool(training_settings.get('normalize_obs', True))
+    reward_mode = str(training_settings.get('reward_mode', '')).lower()
+    dsr_config_obj: Optional[DSRConfig] = None
+    if reward_mode == 'dsr':
+        dsr_raw = training_settings.get('dsr_config') or {}
+        try:
+            clip_raw = dsr_raw.get('clip_value')
+            clip_value = None if clip_raw in (None, '', 'none', 'None') else float(clip_raw)
+            dsr_config_obj = DSRConfig(
+                decay=float(dsr_raw.get('decay', 0.94)),
+                epsilon=float(dsr_raw.get('epsilon', 1e-9)),
+                warmup_steps=int(dsr_raw.get('warmup_steps', 200)),
+                clip_value=clip_value,
+            )
+            dsr_config_obj.validate()
+        except Exception as exc:  # pragma: no cover - config validation
+            raise ValueError(f"Invalid DSR configuration for Optuna: {exc}")
     history_config = _extract_history_config(config_dict.get('features', {}))
     
     def objective(trial):
@@ -619,14 +708,14 @@ def optimize_hyperparameters_with_optuna(
                 env = StockTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
-                    commission=commission,
+                    commission=commission_config,
                     history_config=history_config
                 )
             else:
                 env = ETFTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
-                    commission=commission,
+                    commission=commission_config,
                     history_config=history_config
                 )
                 env = ContinuousActionAdapter(env)
@@ -649,14 +738,14 @@ def optimize_hyperparameters_with_optuna(
                 test_env = StockTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
-                    commission=commission,
+                    commission=commission_config,
                     history_config=history_config
                 )
             else:
                 test_env = ETFTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
-                    commission=commission,
+                    commission=commission_config,
                     history_config=history_config
                 )
                 test_env = ContinuousActionAdapter(test_env)
@@ -665,28 +754,19 @@ def optimize_hyperparameters_with_optuna(
             trade_counts = []
             drawdowns = []
             for episode in range(10):  # 10 evaluation episodes
-                obs = test_env.reset()
-                # Handle tuple return from shimmy wrapper
-                if isinstance(obs, tuple):
-                    obs = obs[0]
-                    
-                done = False
+                obs, _ = test_env.reset()
+
+                terminated = False
+                truncated = False
                 episode_trades = 0
                 peak_value = float(initial_capital)
                 episode_max_drawdown = 0.0
                 total_value = float(initial_capital)
                 
-                while not done:
+                while not (terminated or truncated):
                     prediction = agent.predict(obs, deterministic=True)
                     action = prediction[0] if isinstance(prediction, tuple) else prediction
-                    step_result = test_env.step(action)
-                    
-                    # Handle different return formats (gym vs gymnasium)
-                    if len(step_result) == 4:
-                        obs, reward, done, info = step_result
-                    else:
-                        obs, reward, terminated, truncated, info = step_result
-                        done = terminated or truncated
+                    obs, reward, terminated, truncated, info = test_env.step(action)
                     
                     if action in (1, 2):
                         episode_trades += 1
@@ -766,516 +846,783 @@ def optimize_hyperparameters_with_optuna(
 
 def train_agent(config) -> dict:
     """
-    Main training function.
-    
-    Workflow:
-    1. Load data
-    2. Normalize features
-    3. Create environment
-    4. Create agent
-    5. Train with callbacks
-    6. Save model and metadata
-    
-    Args:
-        config: TrainingConfig dataclass instance or dictionary with keys:
-            - agent_type: 'PPO' or 'SAC'
-            - symbol: Stock/ETF symbol
-            - hyperparameters: Agent hyperparameters dict/object
-            - features: Feature selection dict/object
-            - training_settings: Training settings dict/object
-                - start_date, end_date, commission, initial_cash
-    
-    Returns:
-        Dictionary with training results:
-            - status: 'success' or 'failed'
-            - model_path: Path to saved model
-            - metadata: Model metadata
-            - version: Model version
+    Main entry point for training. Dispatches to the daily or intraday pipeline based on config.
     """
-    
-    # Convert TrainingConfig to dict if necessary
-    if hasattr(config, 'to_dict'):
-        config_dict = config.to_dict()
-    elif not isinstance(config, dict):
-        config_dict = asdict(config)
-    else:
-        config_dict = dict(config)
 
-    requested_agent_type = str(config_dict.get('agent_type', 'PPO')).upper()
-    canonical_agent_type = _canonical_agent_type(requested_agent_type)
-    config_dict['agent_type'] = requested_agent_type
+    ctx = _normalize_training_config(config)
 
-    training_settings = config_dict.get('training_settings') or {}
-    if is_dataclass(training_settings):
-        training_settings = asdict(training_settings)
-    else:
-        training_settings = dict(training_settings)
-    config_dict['training_settings'] = training_settings
-
-    features_payload = _features_payload(config_dict.get('features'))
-    config_dict['features'] = features_payload
-
-    symbol = str(config_dict.get('symbol', '')).upper()
-    if not symbol:
-        raise ValueError("Training configuration must include a symbol")
-
-    train_split = _sanitize_train_split(training_settings.get('train_split', 0.8), default=0.8)
-    training_settings['train_split'] = train_split
-
-    # Extract hyperparameters (supports both API payloads and TrainingConfig output)
-    hyperparams = _resolve_hyperparameters(config_dict)
-
-    print(f"\n{'='*70}")
-    print(f">> Starting Training: {requested_agent_type} Agent (canonical: {canonical_agent_type})")
-    date_range = (
-        f"{training_settings.get('start_date', 'N/A')} to {training_settings.get('end_date', 'N/A')}"
+    _print_training_banner(
+        requested_agent_type=ctx['requested_agent_type'],
+        canonical_agent_type=ctx['canonical_agent_type'],
+        symbol=ctx['symbol'],
+        training_settings=ctx['training_settings'],
+        train_split=ctx['train_split'],
     )
-    print(f"   Symbol: {symbol}")
-    print(f"   Date Range: {date_range}")
-    print(f"   Train/Test Split: {train_split:.2f}/{1-train_split:.2f}")
-    print(f"{'='*70}\n")
-    
+
     try:
-        intraday_mode = _is_intraday_mode(config_dict)
-        reward_mode = str(training_settings.get('reward_mode', '')).lower()
-        dsr_config_raw = training_settings.get('dsr_config') or {}
-        dsr_config_obj: Optional[DSRConfig] = None
+        if _is_intraday_mode(ctx['config_dict']):
+            return _train_intraday_agent(ctx)
+        return _train_daily_agent(ctx)
+    except Exception as exc:
+        print(f"\n[ERROR] Training failed: {exc}")
+        import traceback
+        traceback.print_exc()
 
-        if intraday_mode:
-            train_market, test_market, benchmark_symbol = _load_intraday_training_frames(config_dict, train_split)
-            training_settings.setdefault('benchmark_symbol', benchmark_symbol)
-            interval = training_settings.get('interval', '15m')
-        else:
-            train_market, test_market = load_data(
-                symbol=symbol,
-                start_date=training_settings.get('start_date'),
-                end_date=training_settings.get('end_date'),
-                features=features_payload,
-                train_split=train_split,
+        return {
+            'status': 'failed',
+            'error': str(exc)
+        }
+
+
+def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
+    """Train PPO/SAC daily models without touching intraday resources."""
+
+    config_dict = ctx['config_dict']
+    training_settings = ctx['training_settings']
+    features_payload = ctx['features_payload']
+    symbol = ctx['symbol']
+    requested_agent_type = ctx['requested_agent_type']
+    canonical_agent_type = ctx['canonical_agent_type']
+    hyperparams = ctx['hyperparams']
+    train_split = ctx['train_split']
+
+    reward_mode = str(training_settings.get('reward_mode', '')).lower()
+    dsr_config_raw = training_settings.get('dsr_config') or {}
+    dsr_config_obj: Optional[DSRConfig] = None
+
+    if reward_mode == 'dsr':
+        try:
+            clip_raw = dsr_config_raw.get('clip_value')
+            clip_value = None if clip_raw in (None, '', 'none', 'None') else float(clip_raw)
+            dsr_config_obj = DSRConfig(
+                decay=float(dsr_config_raw.get('decay', 0.94)),
+                epsilon=float(dsr_config_raw.get('epsilon', 1e-9)),
+                warmup_steps=int(dsr_config_raw.get('warmup_steps', 200)),
+                clip_value=clip_value,
             )
-            benchmark_symbol = training_settings.get('benchmark_symbol') or _infer_benchmark_symbol(symbol)
-            interval = training_settings.get('interval', '1d')
+            dsr_config_obj.validate()
+        except Exception as exc:  # pragma: no cover - config validation
+            raise ValueError(f"Invalid DSR configuration: {exc}") from exc
 
-        print(f"[INFO] Data frequency: {'intraday' if intraday_mode else 'daily'} (interval={interval})")
-        print(f"   Training samples: {len(train_market)} | Test samples: {len(test_market)}")
+    train_market, test_market = load_data(
+        symbol=symbol,
+        start_date=training_settings.get('start_date'),
+        end_date=training_settings.get('end_date'),
+        features=features_payload,
+        train_split=train_split,
+    )
 
-        feature_candidates = _select_feature_columns(
-            train_market,
-            features_payload,
-            symbol=symbol,
-            benchmark_symbol=benchmark_symbol,
-            intraday=intraday_mode,
-        )
+    benchmark_symbol = training_settings.get('benchmark_symbol') or _infer_benchmark_symbol(symbol)
+    training_settings.setdefault('benchmark_symbol', benchmark_symbol)
 
+    interval = training_settings.get('interval', '1d')
+    training_settings['interval'] = interval
+    training_settings['data_frequency'] = training_settings.get('data_frequency', 'daily')
+
+    print(f"[INFO] Data frequency: daily (interval={interval})")
+    print(f"   Training samples: {len(train_market)} | Test samples: {len(test_market)}")
+
+    feature_candidates = _select_feature_columns(
+        train_market,
+        features_payload,
+        symbol=symbol,
+        benchmark_symbol=benchmark_symbol,
+        intraday=False,
+    )
+
+    numeric_feature_columns = [
+        col for col in feature_candidates
+        if col in train_market.columns and is_numeric_dtype(train_market[col])
+    ]
+
+    if not numeric_feature_columns:
         numeric_feature_columns = [
-            col for col in feature_candidates
-            if col in train_market.columns and is_numeric_dtype(train_market[col])
+            col for col in train_market.columns if is_numeric_dtype(train_market[col])
         ]
 
-        if not numeric_feature_columns:
-            numeric_feature_columns = [
-                col for col in train_market.columns if is_numeric_dtype(train_market[col])
-            ]
+    if not numeric_feature_columns:
+        raise ValueError("No numeric features available after applying feature configuration.")
 
-        if not numeric_feature_columns:
-            raise ValueError("No numeric features available after applying feature configuration.")
+    train_numeric = (
+        train_market[numeric_feature_columns]
+        .replace([np.inf, -np.inf], np.nan)
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0.0)
+        .astype(np.float32)
+    )
+    test_numeric = (
+        test_market[numeric_feature_columns]
+        .replace([np.inf, -np.inf], np.nan)
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0.0)
+        .astype(np.float32)
+    )
 
-        train_numeric = train_market[numeric_feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        test_numeric = test_market[numeric_feature_columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    train_df = train_numeric.copy()
+    test_df = test_numeric.copy()
 
-        metadata_columns: List[str] = []
-        if intraday_mode:
-            metadata_columns = [col for col in INTRADAY_METADATA_COLUMNS if col in train_market.columns]
+    feature_display = ', '.join(numeric_feature_columns[:15])
+    if len(numeric_feature_columns) > 15:
+        feature_display += ', ...'
 
-        train_df = train_numeric.copy()
-        test_df = test_numeric.copy()
-        for meta_col in metadata_columns:
-            train_df[meta_col] = train_market[meta_col]
-            test_df[meta_col] = test_market[meta_col]
+    print("\n[INFO] Normalizing features...")
+    print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
 
-        if reward_mode == 'dsr':
-            try:
-                clip_raw = dsr_config_raw.get('clip_value')
-                clip_value = None if clip_raw in (None, '', 'none', 'None') else float(clip_raw)
-                dsr_config_obj = DSRConfig(
-                    decay=float(dsr_config_raw.get('decay', 0.94)),
-                    epsilon=float(dsr_config_raw.get('epsilon', 1e-9)),
-                    warmup_steps=int(dsr_config_raw.get('warmup_steps', 200)),
-                    clip_value=clip_value,
-                )
-                dsr_config_obj.validate()
-            except Exception as exc:  # pragma: no cover - config validation
-                raise ValueError(f"Invalid DSR configuration: {exc}") from exc
+    normalizer = StateNormalizer(method='zscore')
+    normalizer.fit(train_numeric.values)
 
-        feature_display = ', '.join(numeric_feature_columns[:15])
-        if len(numeric_feature_columns) > 15:
-            feature_display += ', ...'
+    normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
+    normalizer.save_params(normalizer_path)
+    print(f"[OK] Normalization complete, saved to {normalizer_path}")
 
-        print("\n[INFO] Normalizing features...")
-        print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
+    print("\n[INFO] Creating trading environment...")
 
-        normalizer = StateNormalizer(method='zscore')
-        normalizer.fit(train_numeric.values)
+    initial_capital = training_settings.get('initial_capital')
+    if initial_capital is None:
+        initial_capital = training_settings.get('initial_cash', 100000)
+    initial_capital = float(initial_capital)
 
-        normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
-        normalizer.save_params(normalizer_path)
-        print(f"[OK] Normalization complete, saved to {normalizer_path}")
-        
-        # 3. Create Environment
-        print("\n[INFO] Creating trading environment...")
+    max_position_size = float(training_settings.get('max_position_size', 1.0))
+    normalize_obs = bool(training_settings.get('normalize_obs', True))
+    history_config = _extract_history_config(features_payload)
+    commission_config = resolve_commission_config(training_settings)
 
-        initial_capital = training_settings.get('initial_capital')
-        if initial_capital is None:
-            initial_capital = training_settings.get('initial_cash', 100000)
-        initial_capital = float(initial_capital)
+    if reward_mode == 'dsr' and dsr_config_obj is None:
+        dsr_config_obj = DSRConfig()
 
-        max_position_size = float(training_settings.get('max_position_size', 1.0))
-        normalize_obs = bool(training_settings.get('normalize_obs', True))
-        history_config = _extract_history_config(features_payload)
+    if canonical_agent_type == 'PPO':
+        env = StockTradingEnv(
+            df=train_df,
+            initial_capital=initial_capital,
+            commission=commission_config,
+            max_position_size=max_position_size,
+            risk_penalty=hyperparams.get('risk_penalty', -0.5),
+            normalize_obs=normalize_obs,
+            history_config=history_config
+        )
+        print("[OK] StockTradingEnv created (PPO)")
+    elif canonical_agent_type == 'SAC':
+        base_env = ETFTradingEnv(
+            df=train_df,
+            initial_capital=initial_capital,
+            commission=commission_config,
+            max_position_size=max_position_size,
+            vol_penalty=hyperparams.get('vol_penalty', -0.3),
+            leverage_factor=hyperparams.get('leverage_factor', 3.0),
+            normalize_obs=normalize_obs,
+            history_config=history_config
+        )
 
-        commission_config = resolve_commission_config(training_settings)
+        if reward_mode == 'dsr' and dsr_config_obj is not None:
+            base_env = DSRRewardWrapper(base_env, config=dsr_config_obj)
 
-        if reward_mode == 'dsr' and dsr_config_obj is None:
-            dsr_config_obj = DSRConfig()
+        env = ContinuousActionAdapter(base_env)
+        print("[OK] ETFTradingEnv created (SAC)")
+    else:
+        raise ValueError(f"Unknown agent type: {requested_agent_type}")
 
-        if canonical_agent_type == 'PPO':
-            env = StockTradingEnv(
-                df=train_df,
-                initial_capital=initial_capital,
-                commission=commission_config,
-                max_position_size=max_position_size,
-                risk_penalty=hyperparams.get('risk_penalty', -0.5),
-                normalize_obs=normalize_obs,
-                history_config=history_config
-            )
-            print("[OK] StockTradingEnv created (PPO)")
+    print("\n[INFO] Creating RL agent...")
+    agent = create_agent(
+        agent_type=canonical_agent_type,
+        env=env,
+        hyperparameters=hyperparams,
+        model_dir=f"backend/models/{canonical_agent_type.lower()}"
+    )
+    print(f"[OK] {canonical_agent_type} agent created")
 
-        elif canonical_agent_type == 'SAC':
-            if intraday_mode:
-                sampler = IntradaySessionSampler(shuffle=True)
-                base_env = IntradayEquityEnv(
-                    df=train_df,
-                    initial_capital=initial_capital,
-                    commission=commission_config,
-                    max_position_size=max_position_size,
-                    normalize_obs=normalize_obs,
-                    history_config=history_config,
-                    sampler=sampler
-                )
-                env_label = "IntradayEquityEnv"
-            else:
-                base_env = ETFTradingEnv(
-                    df=train_df,
-                    initial_capital=initial_capital,
-                    commission=commission_config,
-                    max_position_size=max_position_size,
-                    vol_penalty=hyperparams.get('vol_penalty', -0.3),
-                    leverage_factor=hyperparams.get('leverage_factor', 3.0),
-                    normalize_obs=normalize_obs,
-                    history_config=history_config
-                )
-                env_label = "ETFTradingEnv"
+    optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
+    if optuna_trials > 0:
+        print(f"\n[OPTUNA] Running optimization with {optuna_trials} trials...")
+        optimized_hyperparams = optimize_hyperparameters_with_optuna(
+            config_dict=config_dict,
+            train_data=train_df,
+            test_data=test_df,
+            feature_names=numeric_feature_columns,
+            n_trials=optuna_trials
+        )
 
-            if reward_mode == 'dsr' and dsr_config_obj is not None:
-                base_env = DSRRewardWrapper(base_env, config=dsr_config_obj)
+        hyperparams = optimized_hyperparams
 
-            env = ContinuousActionAdapter(base_env)
-            print(f"[OK] {env_label} created (SAC)")
-
-        else:
-            raise ValueError(f"Unknown agent type: {requested_agent_type}")
-        
-        # 4. Create Agent
-        print("\n[INFO] Creating RL agent...")
-        
+        print("\n[INFO] Recreating agent with optimized hyperparameters...")
         agent = create_agent(
             agent_type=canonical_agent_type,
             env=env,
             hyperparameters=hyperparams,
             model_dir=f"backend/models/{canonical_agent_type.lower()}"
         )
+        print("[OK] Agent recreated with optimized parameters")
 
-        print(f"[OK] {canonical_agent_type} agent created")
-        
-        # 4.5. Optuna Hyperparameter Optimization (Optional)
-        optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
-        if intraday_mode and optuna_trials > 0:
-            print("[WARN] Optuna optimization is not currently supported for the intraday pipeline; skipping trials.")
-            optuna_trials = 0
+    print("\n[TRAIN] Training agent...")
 
-        if optuna_trials > 0:
-            print(f"\n[OPTUNA] Running optimization with {optuna_trials} trials...")
-            optimized_hyperparams = optimize_hyperparameters_with_optuna(
-                config_dict=config_dict,
-                train_data=train_df,
-                test_data=test_df,
-                feature_names=numeric_feature_columns,
-                n_trials=optuna_trials
-            )
-            
-            # Update hyperparameters with optimized values
-            hyperparams = optimized_hyperparams
-            
-            # Recreate agent with optimized hyperparameters
-            print("\n[INFO] Recreating agent with optimized hyperparameters...")
-            agent = create_agent(
-                agent_type=canonical_agent_type,
-                env=env,
-                hyperparameters=hyperparams,
-                model_dir=f"backend/models/{canonical_agent_type.lower()}"
-            )
-            print(f"[OK] Agent recreated with optimized parameters")
-        
-        # 5. Train Agent
-        print("\n[TRAIN] Training agent...")
+    steps_per_episode = max(1, len(train_df))
+    requested_total_timesteps = (
+        hyperparams.get('total_timesteps')
+        or training_settings.get('total_timesteps')
+    )
+    requested_episode_budget = hyperparams.get('episodes')
+    fallback_episode_budget = training_settings.get('episode_budget')
 
-        # Calculate total timesteps with sane defaults and caps
-        steps_per_episode = max(1, len(train_df))
-        requested_total_timesteps = (
-            hyperparams.get('total_timesteps')
-            or training_settings.get('total_timesteps')
-        )
-        requested_episode_budget = hyperparams.get('episodes')
-        fallback_episode_budget = training_settings.get('episode_budget')
-
-        resolved_episode_budget = None
-        if requested_total_timesteps:
-            total_timesteps_requested = int(requested_total_timesteps)
-        else:
-            if requested_episode_budget is not None and requested_episode_budget > 0:
-                resolved_episode_budget = int(requested_episode_budget)
-            elif fallback_episode_budget is not None and fallback_episode_budget > 0:
-                resolved_episode_budget = int(fallback_episode_budget)
-            else:
-                resolved_episode_budget = 1
-
-            total_timesteps_requested = resolved_episode_budget * steps_per_episode
-
-        max_total_timesteps = training_settings.get('max_total_timesteps', 1_000_000)
-        if not isinstance(max_total_timesteps, int) or max_total_timesteps <= 0:
-            max_total_timesteps = 1_000_000
-
-        total_timesteps = total_timesteps_requested
-        if total_timesteps > max_total_timesteps:
-            print(
-                f"   Requested total timesteps {total_timesteps:,} exceed limit of "
-                f"{max_total_timesteps:,}. Capping budget."
-            )
-            total_timesteps = max_total_timesteps
-
-        total_timesteps = max(steps_per_episode, total_timesteps)
-        effective_episodes = max(1, math.ceil(total_timesteps / steps_per_episode))
-
-        if resolved_episode_budget is None and requested_episode_budget is not None:
+    resolved_episode_budget = None
+    if requested_total_timesteps:
+        total_timesteps_requested = int(requested_total_timesteps)
+    else:
+        if requested_episode_budget is not None and requested_episode_budget > 0:
             resolved_episode_budget = int(requested_episode_budget)
-        elif resolved_episode_budget is None:
-            resolved_episode_budget = effective_episodes
-
-        print(f"   Episodes requested: {resolved_episode_budget}")
-        if requested_total_timesteps:
-            print(f"   Total timesteps requested: {total_timesteps_requested:,}")
-        print(f"   Steps per episode: {steps_per_episode}")
-        print(f"   Total timesteps: {total_timesteps:,}")
-        print(f"   Effective episodes: {effective_episodes}")
-        
-        
-        # Create progress callback
-        progress_callback = TrainingProgressCallback(
-            total_timesteps=total_timesteps,
-            progress_file='training_progress.json'
-        )
-        
-        # Train
-        start_time = datetime.now()
-        agent.train(total_timesteps=total_timesteps, callback=progress_callback)
-        end_time = datetime.now()
-        
-        training_duration = (end_time - start_time).total_seconds()
-        
-        print(f"\n[OK] Training complete in {training_duration:.1f} seconds")
-        
-        # 6. Evaluate on Test Set
-        test_pct = max(0.0, 100.0 * (1.0 - train_split))
-        print(f"\n[EVAL] Evaluating model on test set (~{test_pct:.0f}%)...")
-        
-        # Create test environment
-        if canonical_agent_type == 'PPO':
-            test_env = StockTradingEnv(
-                df=test_df,
-                initial_capital=initial_capital,
-                commission=commission_config,
-                max_position_size=max_position_size,
-                risk_penalty=hyperparams.get('risk_penalty', -0.5),
-                normalize_obs=normalize_obs,
-                history_config=history_config
-            )
+        elif fallback_episode_budget is not None and fallback_episode_budget > 0:
+            resolved_episode_budget = int(fallback_episode_budget)
         else:
-            if intraday_mode:
-                eval_sampler = IntradaySessionSampler(shuffle=False, sequential=True)
-                base_test_env = IntradayEquityEnv(
-                    df=test_df,
-                    initial_capital=initial_capital,
-                    commission=commission_config,
-                    max_position_size=max_position_size,
-                    normalize_obs=normalize_obs,
-                    history_config=history_config,
-                    sampler=eval_sampler
-                )
-            else:
-                base_test_env = ETFTradingEnv(
-                    df=test_df,
-                    initial_capital=initial_capital,
-                    commission=commission_config,
-                    max_position_size=max_position_size,
-                    vol_penalty=hyperparams.get('vol_penalty', -0.3),
-                    leverage_factor=hyperparams.get('leverage_factor', 3.0),
-                    normalize_obs=normalize_obs,
-                    history_config=history_config
-                )
+            resolved_episode_budget = 1
 
-            test_env = ContinuousActionAdapter(base_test_env)
-        
-        # Run evaluation
-        try:
-            eval_results = evaluate_trained_model(
-                model=agent.model,
-                test_env=test_env,
-                n_eval_episodes=10,
-                initial_capital=initial_capital
-            )
-            
-            # Extract metrics
-            test_metrics = eval_results['metrics']
-            if 'final_balance' not in test_metrics:
-                test_metrics['final_balance'] = initial_capital
-            
-            print(f"\n{'='*70}")
-            print(f"[RESULTS] Test Set Performance:")
-            print(f"{'='*70}")
-            print(f"  Total Return:      {test_metrics['total_return']:>8.2f}%")
-            print(f"  Sharpe Ratio:      {test_metrics['sharpe_ratio']:>8.2f}")
-            print(f"  Sortino Ratio:     {test_metrics['sortino_ratio']:>8.2f}")
-            print(f"  Max Drawdown:      {test_metrics['max_drawdown']:>8.2f}%")
-            print(f"  Calmar Ratio:      {test_metrics['calmar_ratio']:>8.2f}")
-            print(f"  Win Rate:          {test_metrics['win_rate']:>8.2f}%")
-            print(f"  Profit Factor:     {test_metrics['profit_factor']:>8.2f}")
-            print(f"  Total Trades:      {test_metrics['total_trades']:>8}")
-            print(f"  Win/Loss:          {test_metrics['winning_trades']:>4}/{test_metrics['losing_trades']:<4}")
-            print(f"{'='*70}\n")
-            
-        except Exception as eval_error:
-            print(f"\n[WARNING] Evaluation failed: {eval_error}")
-            print("   Continuing with placeholder metrics...")
-            test_metrics = {
-                'sharpe_ratio': 0.0,
-                'sortino_ratio': 0.0,
-                'total_return': 0.0,
-                'max_drawdown': 0.0,
-                'win_rate': 0.0,
-                'profit_factor': 0.0,
-                'calmar_ratio': 0.0,
-                'total_trades': 0,
-                'winning_trades': 0,
-                'losing_trades': 0,
-                'final_balance': initial_capital
-            }
-            eval_results = {'equity_curve': [], 'trades': []}
-        
-        # 7. Save Model
-        print("\n[SAVE] Saving model...")
-        
-        # Generate version
-        version = datetime.now().strftime("v%Y%m%d_%H%M%S")
-        
-        model_manager = ModelManager(base_dir='backend/models')
-        agent_type_lower = canonical_agent_type.lower()
-        symbol_upper = symbol
-        model_path = Path(model_manager.base_dir) / agent_type_lower / f"{agent_type_lower}_{symbol_upper}_{version}.zip"
+        total_timesteps_requested = resolved_episode_budget * steps_per_episode
 
-        data_frequency = training_settings.get('data_frequency') or ('intraday' if intraday_mode else 'daily')
+    max_total_timesteps = training_settings.get('max_total_timesteps', 1_000_000)
+    if not isinstance(max_total_timesteps, int) or max_total_timesteps <= 0:
+        max_total_timesteps = 1_000_000
 
-        # Create metadata with REAL metrics
-        metadata = {
-            'agent_type': requested_agent_type,
-            'canonical_agent_type': canonical_agent_type,
-            'symbol': symbol,
-            'version': version,
-            'created': datetime.now().isoformat(),
-            'created_at': datetime.now().isoformat(),  # For compatibility with ModelSelector
-            'hyperparameters': hyperparams,
-            'features': features_payload,
-            'features_used': numeric_feature_columns,
-            'training_settings': training_settings,
-            'train_samples': len(train_df),
-            'test_samples': len(test_df),
-            'benchmark_symbol': benchmark_symbol,
-            'interval': interval,
-            'data_frequency': data_frequency,
-            'reward_mode': reward_mode,
-            'dsr_config': dsr_config_raw if reward_mode == 'dsr' else {},
-            'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
-            'episodes': int(effective_episodes),
-            'total_timesteps_requested': int(total_timesteps_requested),
-            'total_timesteps': int(total_timesteps),
-            'training_duration_seconds': training_duration,
-            'model_path': str(model_path),
-            'normalizer_path': normalizer_path,
-            # REAL metrics from test set evaluation!
-            'sharpe_ratio': float(test_metrics['sharpe_ratio']),
-            'sortino_ratio': float(test_metrics['sortino_ratio']),
-            'total_return': float(test_metrics['total_return']),
-            'max_drawdown': float(test_metrics['max_drawdown']),
-            'win_rate': float(test_metrics['win_rate']),
-            'profit_factor': float(test_metrics['profit_factor']),
-            'calmar_ratio': float(test_metrics['calmar_ratio']),
-            'total_trades': int(test_metrics['total_trades']),
-            'winning_trades': int(test_metrics['winning_trades']),
-            'losing_trades': int(test_metrics['losing_trades']),
-            'final_balance': float(test_metrics['final_balance']),
-            # Additional evaluation data
-            'equity_curve': eval_results.get('equity_curve', []),
-            'trade_history': eval_results.get('trades', [])
-        }
-        
-        model_id = model_manager.save_model(
+    total_timesteps = total_timesteps_requested
+    if total_timesteps > max_total_timesteps:
+        print(
+            f"   Requested total timesteps {total_timesteps:,} exceed limit of "
+            f"{max_total_timesteps:,}. Capping budget."
+        )
+        total_timesteps = max_total_timesteps
+
+    total_timesteps = max(steps_per_episode, total_timesteps)
+    effective_episodes = max(1, math.ceil(total_timesteps / steps_per_episode))
+
+    if resolved_episode_budget is None and requested_episode_budget is not None:
+        resolved_episode_budget = int(requested_episode_budget)
+    elif resolved_episode_budget is None:
+        resolved_episode_budget = effective_episodes
+
+    print(f"   Episodes requested: {resolved_episode_budget}")
+    if requested_total_timesteps:
+        print(f"   Total timesteps requested: {total_timesteps_requested:,}")
+    print(f"   Steps per episode: {steps_per_episode}")
+    print(f"   Total timesteps: {total_timesteps:,}")
+    print(f"   Effective episodes: {effective_episodes}")
+
+    progress_callback = TrainingProgressCallback(
+        total_timesteps=total_timesteps,
+        progress_file='training_progress.json'
+    )
+
+    start_time = datetime.now()
+    agent.train(total_timesteps=total_timesteps, callback=progress_callback)
+    end_time = datetime.now()
+    training_duration = (end_time - start_time).total_seconds()
+
+    print(f"\n[OK] Training complete in {training_duration:.1f} seconds")
+
+    test_pct = max(0.0, 100.0 * (1.0 - train_split))
+    print(f"\n[EVAL] Evaluating model on test set (~{test_pct:.0f}%)...")
+
+    if canonical_agent_type == 'PPO':
+        test_env = StockTradingEnv(
+            df=test_df,
+            initial_capital=initial_capital,
+            commission=commission_config,
+            max_position_size=max_position_size,
+            risk_penalty=hyperparams.get('risk_penalty', -0.5),
+            normalize_obs=normalize_obs,
+            history_config=history_config
+        )
+    else:
+        base_test_env = ETFTradingEnv(
+            df=test_df,
+            initial_capital=initial_capital,
+            commission=commission_config,
+            max_position_size=max_position_size,
+            vol_penalty=hyperparams.get('vol_penalty', -0.3),
+            leverage_factor=hyperparams.get('leverage_factor', 3.0),
+            normalize_obs=normalize_obs,
+            history_config=history_config
+        )
+        if reward_mode == 'dsr' and dsr_config_obj is not None:
+            base_test_env = DSRRewardWrapper(base_test_env, config=dsr_config_obj)
+        test_env = ContinuousActionAdapter(base_test_env)
+
+    try:
+        eval_results = evaluate_trained_model(
             model=agent.model,
-            agent_type=canonical_agent_type,
-            symbol=symbol,
-            metadata=metadata,
-            version=version
+            test_env=test_env,
+            n_eval_episodes=10,
+            initial_capital=initial_capital,
+            deterministic=True,
         )
 
-        metadata['model_id'] = model_id
-
-        print(f"[OK] Model saved: {model_path}")
-        print(f"[OK] Metadata saved")
+        test_metrics = eval_results['metrics']
+        if 'final_balance' not in test_metrics:
+            test_metrics['final_balance'] = initial_capital
 
         print(f"\n{'='*70}")
-        print(f"[OK] Training Complete!")
-        print(f"   Model: {version}")
-        print(f"   Duration: {training_duration:.1f}s")
-        print(f"   Test Sharpe: {test_metrics['sharpe_ratio']:.2f}")
-        print(f"   Test Return: {test_metrics['total_return']:+.2f}%")
-        print(f"   Max Drawdown: {test_metrics['max_drawdown']:.2f}%")
+        print(f"[RESULTS] Test Set Performance:")
+        print(f"{'='*70}")
+        print(f"  Total Return:      {test_metrics['total_return']:>8.2f}%")
+        print(f"  Sharpe Ratio:      {test_metrics['sharpe_ratio']:>8.2f}")
+        print(f"  Sortino Ratio:     {test_metrics['sortino_ratio']:>8.2f}")
+        print(f"  Max Drawdown:      {test_metrics['max_drawdown']:>8.2f}%")
+        print(f"  Calmar Ratio:      {test_metrics['calmar_ratio']:>8.2f}")
+        print(f"  Win Rate:          {test_metrics['win_rate']:>8.2f}%")
+        print(f"  Profit Factor:     {test_metrics['profit_factor']:>8.2f}")
+        print(f"  Total Trades:      {test_metrics['total_trades']:>8}")
+        print(f"  Win/Loss:          {test_metrics['winning_trades']:>4}/{test_metrics['losing_trades']:<4}")
         print(f"{'='*70}\n")
-        
-        return {
-            'status': 'success',
-            'model_path': str(model_path),
-            'metadata': metadata,
-            'version': version,
-            'model_id': model_id
+    except Exception as eval_error:
+        print(f"\n[WARNING] Evaluation failed: {eval_error}")
+        print("   Continuing with placeholder metrics...")
+        test_metrics = {
+            'sharpe_ratio': 0.0,
+            'sortino_ratio': 0.0,
+            'total_return': 0.0,
+            'max_drawdown': 0.0,
+            'win_rate': 0.0,
+            'profit_factor': 0.0,
+            'calmar_ratio': 0.0,
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'final_balance': initial_capital
         }
-    
-    except Exception as e:
-        print(f"\n[ERROR] Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return {
-            'status': 'failed',
-            'error': str(e)
+        eval_results = {'equity_curve': [], 'trades': []}
+
+    print("\n[SAVE] Saving model...")
+
+    version = datetime.now().strftime("v%Y%m%d_%H%M%S")
+    model_manager = ModelManager(base_dir='backend/models')
+    agent_type_lower = canonical_agent_type.lower()
+    model_path = Path(model_manager.base_dir) / agent_type_lower / f"{agent_type_lower}_{symbol}_{version}.zip"
+
+    metadata = {
+        'agent_type': requested_agent_type,
+        'canonical_agent_type': canonical_agent_type,
+        'symbol': symbol,
+        'version': version,
+        'created': datetime.now().isoformat(),
+        'created_at': datetime.now().isoformat(),
+        'hyperparameters': hyperparams,
+        'features': features_payload,
+        'features_used': numeric_feature_columns,
+        'training_settings': training_settings,
+        'train_samples': len(train_df),
+        'test_samples': len(test_df),
+        'benchmark_symbol': benchmark_symbol,
+        'interval': interval,
+        'data_frequency': training_settings.get('data_frequency', 'daily'),
+        'reward_mode': reward_mode,
+        'dsr_config': dsr_config_raw if reward_mode == 'dsr' else {},
+        'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
+        'episodes': int(effective_episodes),
+        'total_timesteps_requested': int(total_timesteps_requested),
+        'total_timesteps': int(total_timesteps),
+        'training_duration_seconds': training_duration,
+        'model_path': str(model_path),
+        'normalizer_path': normalizer_path,
+        'sharpe_ratio': float(test_metrics['sharpe_ratio']),
+        'sortino_ratio': float(test_metrics['sortino_ratio']),
+        'total_return': float(test_metrics['total_return']),
+        'max_drawdown': float(test_metrics['max_drawdown']),
+        'win_rate': float(test_metrics['win_rate']),
+        'profit_factor': float(test_metrics['profit_factor']),
+        'calmar_ratio': float(test_metrics['calmar_ratio']),
+        'total_trades': int(test_metrics['total_trades']),
+        'winning_trades': int(test_metrics['winning_trades']),
+        'losing_trades': int(test_metrics['losing_trades']),
+        'final_balance': float(test_metrics['final_balance']),
+        'equity_curve': eval_results.get('equity_curve', []),
+        'trade_history': eval_results.get('trades', []),
+    }
+
+    model_id = model_manager.save_model(
+        model=agent.model,
+        agent_type=canonical_agent_type,
+        symbol=symbol,
+        metadata=metadata,
+        version=version,
+    )
+    metadata['model_id'] = model_id
+
+    print(f"[OK] Model saved: {model_path}")
+    print("[OK] Metadata saved")
+
+    print(f"\n{'='*70}")
+    print("[OK] Training Complete!")
+    print(f"   Model: {version}")
+    print(f"   Duration: {training_duration:.1f}s")
+    print(f"   Test Sharpe: {test_metrics['sharpe_ratio']:.2f}")
+    print(f"   Test Return: {test_metrics['total_return']:+.2f}%")
+    print(f"   Max Drawdown: {test_metrics['max_drawdown']:.2f}%")
+    print(f"{'='*70}\n")
+
+    return {
+        'status': 'success',
+        'model_path': str(model_path),
+        'metadata': metadata,
+        'version': version,
+        'model_id': model_id,
+    }
+
+
+def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
+    """Train SAC intraday models on a completely separate pipeline."""
+
+    config_dict = ctx['config_dict']
+    training_settings = ctx['training_settings']
+    features_payload = ctx['features_payload']
+    symbol = ctx['symbol']
+    requested_agent_type = ctx['requested_agent_type']
+    canonical_agent_type = ctx['canonical_agent_type']
+    hyperparams = ctx['hyperparams']
+    train_split = ctx['train_split']
+
+    allowed_symbols = {'TNA', 'TQQQ', 'UPRO'}
+    if symbol not in allowed_symbols:
+        raise ValueError("SAC_INTRADAY_DSR pipeline currently supports only TNA, TQQQ, or UPRO")
+
+    training_settings['data_frequency'] = 'intraday'
+    training_settings['interval'] = training_settings.get('interval', '15m') or '15m'
+    training_settings['reward_mode'] = training_settings.get('reward_mode', 'dsr') or 'dsr'
+
+    reward_mode = training_settings['reward_mode'].lower()
+    dsr_config_raw = training_settings.get('dsr_config') or {
+        'decay': 0.94,
+        'epsilon': 1e-9,
+        'warmup_steps': 200,
+        'clip_value': 6.0,
+    }
+    training_settings['dsr_config'] = dsr_config_raw
+
+    try:
+        clip_raw = dsr_config_raw.get('clip_value')
+        clip_value = None if clip_raw in (None, '', 'none', 'None') else float(clip_raw)
+        dsr_config_obj = DSRConfig(
+            decay=float(dsr_config_raw.get('decay', 0.94)),
+            epsilon=float(dsr_config_raw.get('epsilon', 1e-9)),
+            warmup_steps=int(dsr_config_raw.get('warmup_steps', 200)),
+            clip_value=clip_value,
+        )
+        dsr_config_obj.validate()
+    except Exception as exc:  # pragma: no cover - config validation
+        raise ValueError(f"Invalid DSR configuration: {exc}") from exc
+
+    train_market, test_market, benchmark_symbol = _load_intraday_training_frames(config_dict, train_split)
+    training_settings.setdefault('benchmark_symbol', benchmark_symbol)
+
+    interval = training_settings['interval']
+
+    print(f"[INFO] Data frequency: intraday (interval={interval})")
+    print(f"   Training samples: {len(train_market)} | Test samples: {len(test_market)}")
+
+    feature_candidates = _select_feature_columns(
+        train_market,
+        features_payload,
+        symbol=symbol,
+        benchmark_symbol=benchmark_symbol,
+        intraday=True,
+    )
+
+    numeric_feature_columns = [
+        col for col in feature_candidates
+        if col in train_market.columns and is_numeric_dtype(train_market[col])
+    ]
+
+    if not numeric_feature_columns:
+        numeric_feature_columns = [
+            col for col in train_market.columns if is_numeric_dtype(train_market[col])
+        ]
+
+    if not numeric_feature_columns:
+        raise ValueError("No numeric features available after applying feature configuration.")
+
+    train_numeric = (
+        train_market[numeric_feature_columns]
+        .replace([np.inf, -np.inf], np.nan)
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0.0)
+        .astype(np.float32)
+    )
+    test_numeric = (
+        test_market[numeric_feature_columns]
+        .replace([np.inf, -np.inf], np.nan)
+        .apply(pd.to_numeric, errors='coerce')
+        .fillna(0.0)
+        .astype(np.float32)
+    )
+
+    metadata_columns = [col for col in INTRADAY_METADATA_COLUMNS if col in train_market.columns]
+    train_df = train_numeric.copy()
+    test_df = test_numeric.copy()
+    for meta_col in metadata_columns:
+        train_df[meta_col] = train_market[meta_col]
+        test_df[meta_col] = test_market[meta_col]
+
+    primary_prefix = symbol.lower()
+    primary_close = f"{primary_prefix}_close"
+    primary_price = f"{primary_prefix}_price"
+    source_close = None
+    if primary_close in train_market.columns:
+        source_close = primary_close
+    elif primary_price in train_market.columns:
+        source_close = primary_price
+
+    if source_close is None:
+        raise ValueError(f"Intraday dataset missing primary close column for {symbol}.")
+
+    train_df['close'] = train_market[source_close].astype(np.float32)
+    test_df['close'] = test_market[source_close].astype(np.float32)
+
+    feature_display = ', '.join(numeric_feature_columns[:15])
+    if len(numeric_feature_columns) > 15:
+        feature_display += ', ...'
+
+    print("\n[INFO] Normalizing features...")
+    print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
+
+    normalizer = StateNormalizer(method='zscore')
+    normalizer.fit(train_numeric.values)
+
+    normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
+    normalizer.save_params(normalizer_path)
+    print(f"[OK] Normalization complete, saved to {normalizer_path}")
+
+    print("\n[INFO] Creating trading environment...")
+
+    initial_capital = training_settings.get('initial_capital')
+    if initial_capital is None:
+        initial_capital = training_settings.get('initial_cash', 100000)
+    initial_capital = float(initial_capital)
+
+    max_position_size = float(training_settings.get('max_position_size', 1.0))
+    normalize_obs = bool(training_settings.get('normalize_obs', True))
+    history_config = _extract_history_config(features_payload)
+    commission_config = resolve_commission_config(training_settings)
+
+    sampler = IntradaySessionSampler(shuffle=True)
+    base_env = IntradayEquityEnv(
+        df=train_df,
+        initial_capital=initial_capital,
+        commission=commission_config,
+        max_position_size=max_position_size,
+        normalize_obs=normalize_obs,
+        history_config=history_config,
+        sampler=sampler,
+    )
+
+    training_env: Any = DSRRewardWrapper(base_env, config=dsr_config_obj)
+    env = ContinuousActionAdapter(training_env)
+    print("[OK] IntradayEquityEnv created (SAC)")
+
+    print("\n[INFO] Creating RL agent...")
+    agent = create_agent(
+        agent_type=canonical_agent_type,
+        env=env,
+        hyperparameters=hyperparams,
+        model_dir=f"backend/models/{canonical_agent_type.lower()}"
+    )
+    print(f"[OK] {canonical_agent_type} agent created")
+
+    optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
+    if optuna_trials > 0:
+        print("[WARN] Optuna optimization is disabled for the intraday pipeline; forcing 0 trials.")
+        optuna_trials = 0
+    training_settings['optuna_trials'] = optuna_trials
+
+    print("\n[TRAIN] Training agent...")
+
+    steps_per_episode = max(1, len(train_df))
+    requested_total_timesteps = (
+        hyperparams.get('total_timesteps')
+        or training_settings.get('total_timesteps')
+    )
+    requested_episode_budget = hyperparams.get('episodes')
+    fallback_episode_budget = training_settings.get('episode_budget')
+
+    resolved_episode_budget = None
+    if requested_total_timesteps:
+        total_timesteps_requested = int(requested_total_timesteps)
+    else:
+        if requested_episode_budget is not None and requested_episode_budget > 0:
+            resolved_episode_budget = int(requested_episode_budget)
+        elif fallback_episode_budget is not None and fallback_episode_budget > 0:
+            resolved_episode_budget = int(fallback_episode_budget)
+        else:
+            resolved_episode_budget = 1
+
+        total_timesteps_requested = resolved_episode_budget * steps_per_episode
+
+    max_total_timesteps = training_settings.get('max_total_timesteps', 1_000_000)
+    if not isinstance(max_total_timesteps, int) or max_total_timesteps <= 0:
+        max_total_timesteps = 1_000_000
+
+    total_timesteps = total_timesteps_requested
+    if total_timesteps > max_total_timesteps:
+        print(
+            f"   Requested total timesteps {total_timesteps:,} exceed limit of "
+            f"{max_total_timesteps:,}. Capping budget."
+        )
+        total_timesteps = max_total_timesteps
+
+    total_timesteps = max(steps_per_episode, total_timesteps)
+    effective_episodes = max(1, math.ceil(total_timesteps / steps_per_episode))
+
+    if resolved_episode_budget is None and requested_episode_budget is not None:
+        resolved_episode_budget = int(requested_episode_budget)
+    elif resolved_episode_budget is None:
+        resolved_episode_budget = effective_episodes
+
+    print(f"   Episodes requested: {resolved_episode_budget}")
+    if requested_total_timesteps:
+        print(f"   Total timesteps requested: {total_timesteps_requested:,}")
+    print(f"   Steps per episode: {steps_per_episode}")
+    print(f"   Total timesteps: {total_timesteps:,}")
+    print(f"   Effective episodes: {effective_episodes}")
+
+    progress_callback = TrainingProgressCallback(
+        total_timesteps=total_timesteps,
+        progress_file='training_progress.json'
+    )
+
+    start_time = datetime.now()
+    agent.train(total_timesteps=total_timesteps, callback=progress_callback)
+    end_time = datetime.now()
+    training_duration = (end_time - start_time).total_seconds()
+
+    print(f"\n[OK] Training complete in {training_duration:.1f} seconds")
+
+    test_pct = max(0.0, 100.0 * (1.0 - train_split))
+    print(f"\n[EVAL] Evaluating model on test set (~{test_pct:.0f}%)...")
+
+    eval_sampler = IntradaySessionSampler(shuffle=False, sequential=True)
+    base_test_env = IntradayEquityEnv(
+        df=test_df,
+        initial_capital=initial_capital,
+        commission=commission_config,
+        max_position_size=max_position_size,
+        normalize_obs=normalize_obs,
+        history_config=history_config,
+        sampler=eval_sampler,
+    )
+    test_env = ContinuousActionAdapter(DSRRewardWrapper(base_test_env, config=dsr_config_obj))
+
+    try:
+        eval_results = evaluate_trained_model(
+            model=agent.model,
+            test_env=test_env,
+            n_eval_episodes=10,
+            initial_capital=initial_capital,
+            deterministic=False,
+        )
+
+        test_metrics = eval_results['metrics']
+        if 'final_balance' not in test_metrics:
+            test_metrics['final_balance'] = initial_capital
+
+        print(f"\n{'='*70}")
+        print(f"[RESULTS] Test Set Performance:")
+        print(f"{'='*70}")
+        print(f"  Total Return:      {test_metrics['total_return']:>8.2f}%")
+        print(f"  Sharpe Ratio:      {test_metrics['sharpe_ratio']:>8.2f}")
+        print(f"  Sortino Ratio:     {test_metrics['sortino_ratio']:>8.2f}")
+        print(f"  Max Drawdown:      {test_metrics['max_drawdown']:>8.2f}%")
+        print(f"  Calmar Ratio:      {test_metrics['calmar_ratio']:>8.2f}")
+        print(f"  Win Rate:          {test_metrics['win_rate']:>8.2f}%")
+        print(f"  Profit Factor:     {test_metrics['profit_factor']:>8.2f}")
+        print(f"  Total Trades:      {test_metrics['total_trades']:>8}")
+        print(f"  Win/Loss:          {test_metrics['winning_trades']:>4}/{test_metrics['losing_trades']:<4}")
+        print(f"{'='*70}\n")
+    except Exception as eval_error:
+        print(f"\n[WARNING] Evaluation failed: {eval_error}")
+        print("   Continuing with placeholder metrics...")
+        test_metrics = {
+            'sharpe_ratio': 0.0,
+            'sortino_ratio': 0.0,
+            'total_return': 0.0,
+            'max_drawdown': 0.0,
+            'win_rate': 0.0,
+            'profit_factor': 0.0,
+            'calmar_ratio': 0.0,
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'final_balance': initial_capital
         }
+        eval_results = {'equity_curve': [], 'trades': []}
+
+    print("\n[SAVE] Saving model...")
+
+    version = datetime.now().strftime("v%Y%m%d_%H%M%S")
+    model_manager = ModelManager(base_dir='backend/models')
+    agent_type_lower = canonical_agent_type.lower()
+    model_path = Path(model_manager.base_dir) / agent_type_lower / f"{agent_type_lower}_{symbol}_{version}.zip"
+
+    metadata = {
+        'agent_type': requested_agent_type,
+        'canonical_agent_type': canonical_agent_type,
+        'symbol': symbol,
+        'version': version,
+        'created': datetime.now().isoformat(),
+        'created_at': datetime.now().isoformat(),
+        'hyperparameters': hyperparams,
+        'features': features_payload,
+        'features_used': numeric_feature_columns,
+        'training_settings': training_settings,
+        'train_samples': len(train_df),
+        'test_samples': len(test_df),
+        'benchmark_symbol': benchmark_symbol,
+        'interval': interval,
+        'data_frequency': 'intraday',
+        'reward_mode': reward_mode,
+        'dsr_config': dsr_config_raw,
+        'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
+        'episodes': int(effective_episodes),
+        'total_timesteps_requested': int(total_timesteps_requested),
+        'total_timesteps': int(total_timesteps),
+        'training_duration_seconds': training_duration,
+        'model_path': str(model_path),
+        'normalizer_path': normalizer_path,
+        'sharpe_ratio': float(test_metrics['sharpe_ratio']),
+        'sortino_ratio': float(test_metrics['sortino_ratio']),
+        'total_return': float(test_metrics['total_return']),
+        'max_drawdown': float(test_metrics['max_drawdown']),
+        'win_rate': float(test_metrics['win_rate']),
+        'profit_factor': float(test_metrics['profit_factor']),
+        'calmar_ratio': float(test_metrics['calmar_ratio']),
+        'total_trades': int(test_metrics['total_trades']),
+        'winning_trades': int(test_metrics['winning_trades']),
+        'losing_trades': int(test_metrics['losing_trades']),
+        'final_balance': float(test_metrics['final_balance']),
+        'equity_curve': eval_results.get('equity_curve', []),
+        'trade_history': eval_results.get('trades', []),
+    }
+
+    model_id = model_manager.save_model(
+        model=agent.model,
+        agent_type=canonical_agent_type,
+        symbol=symbol,
+        metadata=metadata,
+        version=version,
+    )
+    metadata['model_id'] = model_id
+
+    print(f"[OK] Model saved: {model_path}")
+    print("[OK] Metadata saved")
+
+    print(f"\n{'='*70}")
+    print("[OK] Training Complete!")
+    print(f"   Model: {version}")
+    print(f"   Duration: {training_duration:.1f}s")
+    print(f"   Test Sharpe: {test_metrics['sharpe_ratio']:.2f}")
+    print(f"   Test Return: {test_metrics['total_return']:+.2f}%")
+    print(f"   Max Drawdown: {test_metrics['max_drawdown']:.2f}%")
+    print(f"{'='*70}\n")
+
+    return {
+        'status': 'success',
+        'model_path': str(model_path),
+        'metadata': metadata,
+        'version': version,
+        'model_id': model_id,
+    }
 
 
 if __name__ == '__main__':

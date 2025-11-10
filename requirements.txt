@@ -8,7 +8,7 @@ flask-cors==4.0.0
 # None needed - SQLite is included in Python standard library
 
 # Data Processing
-numpy>=1.26.0,<2.0  # Must be <2.0 for gym compatibility
+numpy>=1.26.0
 pandas>=2.1.0
 # scipy>=1.11.0  # Removed - using pure NumPy for drift detection (PSI)
 
@@ -21,8 +21,7 @@ aiohttp>=3.8.0
 # Reinforcement Learning - Updated for Training Module
 stable-baselines3==2.1.0
 gymnasium==0.29.1
-gym==0.26.2
-shimmy==0.2.1  # Required for gym compatibility with stable-baselines3
+shimmy==0.2.1  # Compatibility helpers for Gymnasium environments
 optuna>=3.0.0  # Hyperparameter optimization
 
 # PyTorch with CUDA support (for GPU acceleration)

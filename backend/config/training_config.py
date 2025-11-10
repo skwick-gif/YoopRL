@@ -225,6 +225,37 @@ class FeatureConfig:
             'performance': {'enabled': True, 'period': '14d'},
             'position_history': {'enabled': True, 'length': 10},
             'reward_history': {'enabled': True, 'length': 10}
+        },
+        'SAC_INTRADAY_DSR': {
+            'price': True,
+            'volume': True,
+            'ohlc': True,
+            'rsi': {'enabled': True, 'period': 14},
+            'macd': {'enabled': True, 'params': '12,26,9'},
+            'ema': {'enabled': True, 'periods': '10,50'},
+            'vix': False,
+            'bollinger': {'enabled': False},
+            'stochastic': {'enabled': False},
+            'adx': {'enabled': True, 'period': 14},
+            'multi_asset': {'enabled': False, 'symbols': []},
+            'sentiment': False,
+            'macro': False,
+            'social_media': False,
+            'news_headlines': False,
+            'market_events': False,
+            'fundamental': False,
+            'base_trend_context': True,
+            'base_momentum': True,
+            'base_trend_strength': True,
+            'base_extremes': True,
+            'leveraged_volatility': True,
+            'leveraged_momentum_short': True,
+            'time_context': True,
+            'position_context': True,
+            'recent_actions': False,
+            'performance': False,
+            'position_history': False,
+            'reward_history': False
         }
     }
 
@@ -356,7 +387,7 @@ class TrainingConfig:
     """
     Complete training configuration.
     """
-    agent_type: str  # 'PPO' or 'SAC'
+    agent_type: str  # 'PPO', 'SAC', or 'SAC_INTRADAY_DSR'
     symbol: str
     ppo_hyperparameters: Optional[PPOHyperparameters] = None
     sac_hyperparameters: Optional[SACHyperparameters] = None
@@ -365,10 +396,52 @@ class TrainingConfig:
     
     def __post_init__(self):
         """Initialize appropriate hyperparameters based on agent type."""
-        if self.agent_type == 'PPO' and self.ppo_hyperparameters is None:
+        canonical_agent = self.agent_type
+        if self.agent_type == 'SAC_INTRADAY_DSR':
+            canonical_agent = 'SAC'
+
+        if canonical_agent == 'PPO' and self.ppo_hyperparameters is None:
             self.ppo_hyperparameters = PPOHyperparameters()
-        elif self.agent_type == 'SAC' and self.sac_hyperparameters is None:
-            self.sac_hyperparameters = SACHyperparameters()
+        elif canonical_agent == 'SAC' and self.sac_hyperparameters is None:
+            if self.agent_type == 'SAC_INTRADAY_DSR':
+                self.sac_hyperparameters = SACHyperparameters(
+                    learning_rate=0.0001,
+                    buffer_size=200_000,
+                    batch_size=256,
+                    tau=0.005,
+                    gamma=0.99,
+                    ent_coef='auto',
+                    target_entropy='auto',
+                    vol_penalty=-0.0,
+                    episodes=250_000,
+                )
+            else:
+                self.sac_hyperparameters = SACHyperparameters()
+
+        # Ensure intraday defaults are set when required
+        if self.agent_type == 'SAC_INTRADAY_DSR':
+            if not isinstance(self.training_settings, TrainingSettings):
+                self.training_settings = TrainingSettings(**asdict(self.training_settings))
+
+            if not self.training_settings.data_frequency:
+                self.training_settings.data_frequency = 'intraday'
+            if not self.training_settings.interval:
+                self.training_settings.interval = '15m'
+            if not self.training_settings.reward_mode:
+                self.training_settings.reward_mode = 'dsr'
+            if not self.training_settings.benchmark_symbol:
+                self.training_settings.benchmark_symbol = _infer_benchmark_symbol(self.symbol)
+            if not self.training_settings.benchmark_interval:
+                self.training_settings.benchmark_interval = '15m'
+            if not self.training_settings.dsr_config:
+                self.training_settings.dsr_config = {
+                    'decay': 0.94,
+                    'epsilon': 1e-9,
+                    'warmup_steps': 200,
+                    'clip_value': 6.0,
+                }
+            if self.training_settings.optuna_trials < 1:
+                self.training_settings.optuna_trials = 0
 
         # Normalize feature configuration
         if isinstance(self.features, dict):
@@ -397,13 +470,16 @@ class TrainingConfig:
         }
         
         # Validate agent type
-        if self.agent_type not in ['PPO', 'SAC']:
-            errors['agent_type'].append("Agent type must be 'PPO' or 'SAC'")
+        supported_agents = {'PPO', 'SAC', 'SAC_INTRADAY_DSR'}
+        if self.agent_type not in supported_agents:
+            errors['agent_type'].append("Agent type must be one of: PPO, SAC, SAC_INTRADAY_DSR")
         
         # Validate hyperparameters
-        if self.agent_type == 'PPO' and self.ppo_hyperparameters:
+        canonical_agent = self.agent_type if self.agent_type != 'SAC_INTRADAY_DSR' else 'SAC'
+
+        if canonical_agent == 'PPO' and self.ppo_hyperparameters:
             errors['hyperparameters'] = self.ppo_hyperparameters.validate()
-        elif self.agent_type == 'SAC' and self.sac_hyperparameters:
+        elif canonical_agent == 'SAC' and self.sac_hyperparameters:
             errors['hyperparameters'] = self.sac_hyperparameters.validate()
         
         # Validate training settings
@@ -629,76 +705,50 @@ def get_sac_intraday_dsr_preset(symbol: str, benchmark_symbol: Optional[str] = N
 
     benchmark_symbol = benchmark_symbol or _infer_benchmark_symbol(symbol)
 
-    features = FeatureConfig.for_agent('SAC').with_overrides({
-        'price': True,
-        'volume': True,
-        'ohlc': True,
-        'rsi': {'enabled': False},
-        'macd': {'enabled': False},
-        'ema': {'enabled': False},
-        'vix': False,
-        'bollinger': {'enabled': False},
-        'stochastic': {'enabled': False},
-        'adx': {'enabled': False},
-        'multi_asset': {'enabled': False, 'symbols': []},
-        'sentiment': False,
-        'macro': False,
-        'social_media': False,
-        'news_headlines': False,
-        'market_events': False,
-        'fundamental': False,
-        'base_trend_context': True,
-        'base_momentum': True,
-        'base_trend_strength': True,
-        'base_extremes': True,
-        'leveraged_volatility': True,
-        'leveraged_momentum_short': False,
-        'time_context': True,
-        'position_context': True,
-        'recent_actions': {'enabled': True, 'length': 6},
-        'performance': {'enabled': True, 'period': '10d'},
-        'position_history': {'enabled': True, 'length': 10},
-        'reward_history': False
-    })
+    features = FeatureConfig.for_agent('SAC_INTRADAY_DSR')
 
     sac_params = SACHyperparameters(
         learning_rate=0.0001,
-        buffer_size=300000,
-        batch_size=512,
+        buffer_size=200_000,
+        batch_size=256,
         tau=0.005,
         gamma=0.99,
         ent_coef='auto',
         target_entropy='auto',
-        vol_penalty=-0.25,
-        episodes=250000
+        vol_penalty=0.0,
+        episodes=250_000
     )
 
     now_str = datetime.utcnow().strftime('%Y-%m-%d')
 
     training_settings = TrainingSettings(
-        start_date='2023-01-01',
+        start_date='2018-01-01',
         end_date=now_str,
-    commission=0.005,
+        commission={'per_share': 0.005, 'min_fee': 1.0, 'max_pct': 0.01},
+        commission_model='ibkr_tiered_us_equities',
+        commission_min_fee=1.0,
+        commission_max_pct=0.01,
         max_position_size=1.0,
         optuna_trials=50,
         normalize_obs=True,
-        episode_budget=300,
+        episode_budget=1500,
+        max_total_timesteps=1_000_000,
         data_frequency='intraday',
         interval='15m',
         benchmark_symbol=benchmark_symbol,
-    benchmark_interval='15m',
+        benchmark_interval='15m',
         reward_mode='dsr',
         train_split=0.8,
         dsr_config={
-            'decay': 0.97,
+            'decay': 0.94,
             'epsilon': 1e-9,
-            'warmup_steps': 150,
-            'clip_value': 4.0
+            'warmup_steps': 200,
+            'clip_value': 6.0
         }
     )
 
     return TrainingConfig(
-        agent_type='SAC',
+        agent_type='SAC_INTRADAY_DSR',
         symbol=symbol,
         sac_hyperparameters=sac_params,
         features=features,

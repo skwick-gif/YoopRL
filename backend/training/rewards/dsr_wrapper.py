@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-import gym
+import gymnasium as gym
 import numpy as np
 
 
@@ -45,16 +45,16 @@ class DSRRewardWrapper(gym.Wrapper):
         self._prev_value = None
 
     def reset(self, **kwargs):  # type: ignore[override]
-        obs = self.env.reset(**kwargs)
+        obs, info = self.env.reset(**kwargs)
         self._mean = 0.0
         self._second = 0.0
         self._prev_mean = 0.0
         self._steps = 0
         self._prev_value = None
-        return obs
+        return obs, info
 
     def step(self, action):  # type: ignore[override]
-        obs, base_reward, done, info = self.env.step(action)
+        obs, base_reward, terminated, truncated, info = self.env.step(action)
 
         total_value = self._extract_total_value(info)
         if total_value is None:
@@ -90,7 +90,7 @@ class DSRRewardWrapper(gym.Wrapper):
         info['net_return'] = net_return
         info['base_reward'] = base_reward
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
     def _extract_total_value(self, info: Dict) -> Optional[float]:
         if isinstance(info, dict) and 'total_value' in info:

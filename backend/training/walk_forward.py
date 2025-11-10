@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-import gym
+import gymnasium as gym
 import numpy as np
 import pandas as pd
 
@@ -500,24 +500,17 @@ def _run_sequential_sessions(
 
     for idx, session_date in enumerate(base_env.session_dates):
         base_env.initial_capital = carry_capital
-        obs = env.reset()
-        if isinstance(obs, tuple):
-            obs = obs[0]
+        obs, _ = env.reset()
 
         session_initial = float(base_env.initial_capital)
         prev_value = session_initial
         steps = 0
 
-        done = False
-        while not done:
+        terminated = False
+        truncated = False
+        while not (terminated or truncated):
             action, _ = model.predict(obs, deterministic=deterministic)
-            step_result = env.step(action)
-
-            if len(step_result) == 5:
-                obs, reward, terminated, truncated, info = step_result
-                done = bool(terminated or truncated)
-            else:
-                obs, reward, done, info = step_result  # type: ignore[assignment]
+            obs, reward, terminated, truncated, info = env.step(action)
 
             total_value = info.get("total_value", getattr(base_env, "total_value", prev_value))
             total_value = float(total_value)

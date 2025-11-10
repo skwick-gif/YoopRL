@@ -39,7 +39,7 @@ Wiring:
 
 import numpy as np
 import pandas as pd
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from environments.base_env import BaseTradingEnv
 
 
@@ -184,20 +184,19 @@ class ETFTradingEnv(BaseTradingEnv):
         
         return total_reward
     
-    def reset(self) -> np.ndarray:
-        """
-        Reset environment and tracking variables.
-        
-        Returns:
-            Initial observation
-        """
-        obs = super().reset()
-        
-        # Reset ETF-specific tracking
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[Dict] = None,
+    ) -> Tuple[np.ndarray, Dict]:
+        """Reset environment state and ETF-specific tracking helpers."""
+        obs, info = super().reset(seed=seed, options=options)
+
         self.previous_value = self.initial_capital
         self.returns_window = []
-        
-        return obs
+
+        return obs, info
     
     def get_etf_metrics(self) -> dict:
         """

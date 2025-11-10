@@ -33,7 +33,7 @@ Wiring:
 
 import numpy as np
 import pandas as pd
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from environments.base_env import BaseTradingEnv
 
 
@@ -191,21 +191,20 @@ class StockTradingEnv(BaseTradingEnv):
         
         return total_reward
     
-    def reset(self) -> np.ndarray:
-        """
-        Reset environment and risk tracking.
-        
-        Returns:
-            Initial observation
-        """
-        obs = super().reset()
-        
-        # Reset risk tracking
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[Dict] = None,
+    ) -> Tuple[np.ndarray, Dict]:
+        """Reset environment-specific tracking before starting an episode."""
+        obs, info = super().reset(seed=seed, options=options)
+
         self.previous_value = self.initial_capital
         self.peak_value = self.initial_capital
         self.returns_window = []
-        
-        return obs
+
+        return obs, info
     
     def get_risk_metrics(self) -> dict:
         """

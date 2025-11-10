@@ -84,12 +84,17 @@ class SACAgent:
         
         # Extract hyperparameters with defaults
         learning_rate = hyperparameters.get('learning_rate', 0.0003)
-        buffer_size = hyperparameters.get('buffer_size', 1000000)
+        buffer_size = hyperparameters.get('buffer_size', 1_000_000)
         batch_size = hyperparameters.get('batch_size', 256)
         tau = hyperparameters.get('tau', 0.005)
         gamma = hyperparameters.get('gamma', 0.99)
         ent_coef = hyperparameters.get('ent_coef', 'auto')
         target_entropy = hyperparameters.get('target_entropy', 'auto')
+        train_freq = hyperparameters.get('train_freq', 1)
+        gradient_steps = hyperparameters.get('gradient_steps', 1)
+        learning_starts = hyperparameters.get('learning_starts', 1000)
+        target_update_interval = hyperparameters.get('target_update_interval', 1)
+        policy_kwargs = hyperparameters.get('policy_kwargs', {'net_arch': [256, 256]})
         
         # Auto-detect CUDA/CPU
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -105,11 +110,11 @@ class SACAgent:
             gamma=gamma,
             ent_coef=ent_coef,
             target_entropy=target_entropy,
-            train_freq=1,  # Update after every step
-            gradient_steps=1,  # Number of gradient steps per update
-            policy_kwargs={
-                'net_arch': [256, 256]  # MLP: 2 hidden layers, 256 neurons each
-            },
+            train_freq=train_freq,
+            gradient_steps=gradient_steps,
+            learning_starts=learning_starts,
+            target_update_interval=target_update_interval,
+            policy_kwargs=policy_kwargs,
             device=device,  # GPU support
             verbose=1,
             tensorboard_log=f"{model_dir}/tensorboard/"
@@ -124,7 +129,7 @@ class SACAgent:
         print(f"   Batch Size: {batch_size}")
         print(f"   Gamma: {gamma}")
         print(f"   Entropy Coef: {ent_coef}")
-        print(f"   Network: [256, 256]")
+        print(f"   Network: {policy_kwargs.get('net_arch', '[default]')}")
     
     def train(
         self, 

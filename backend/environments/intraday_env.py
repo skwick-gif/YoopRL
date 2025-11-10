@@ -70,20 +70,19 @@ class IntradayEquityEnv(BaseTradingEnv):
             history_config=history_config
         )
 
-    def reset(self):  # type: ignore[override]
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):  # type: ignore[override]
         next_idx = self.sampler.next_index(len(self.session_dates), self.active_session_idx)
         self.active_session_idx = next_idx
         self.df = self._prepare_session_dataframe(next_idx)
         self.n_steps = len(self.df)
         self._prev_total_value = self.initial_capital
-        obs = super().reset()
-        return obs
+        obs, info = super().reset(seed=seed, options=options)
+        return obs, info
 
     def step(self, action: int):  # type: ignore[override]
         forced_exit = self._is_last_step() and self.holdings > 0 and action != 2
         adjusted_action = 2 if forced_exit else action
-
-        obs, reward, done, info = super().step(adjusted_action)
+        obs, reward, terminated, truncated, info = super().step(adjusted_action)
 
         row_idx = max(self.current_step - 1, 0)
         row = self.df.iloc[row_idx]
@@ -95,7 +94,7 @@ class IntradayEquityEnv(BaseTradingEnv):
         info['bar_index'] = int(row.get('bar_index', row_idx))
         info['minutes_from_open'] = float(row.get('minutes_from_open', 0.0))
 
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
 
     def _calculate_reward(self, action: int, current_price: float) -> float:
         prev = self._prev_total_value if self._prev_total_value != 0 else 1e-8

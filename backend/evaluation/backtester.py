@@ -109,8 +109,9 @@ class Backtester:
         print(f"{'='*70}\n")
         
         # Reset environment
-        obs = self.env.reset()
-        done = False
+        obs, _ = self.env.reset()
+        terminated = False
+        truncated = False
         
         # Tracking variables
         equity_curve = [self.env.initial_capital]
@@ -121,13 +122,13 @@ class Backtester:
         prev_position = 0
         
         # Run episode
-        while not done and step < len(self.test_data):
+        while not (terminated or truncated) and step < len(self.test_data):
             # Predict action (deterministic for backtesting)
             prediction = self.agent.predict(obs, deterministic=True)
             action = prediction[0] if isinstance(prediction, tuple) else prediction
             
             # Execute action
-            obs, reward, done, info = self.env.step(action)
+            obs, reward, terminated, truncated, info = self.env.step(action)
             
             # Track equity
             current_equity = info.get('total_value', self.env.total_value)
@@ -253,7 +254,9 @@ def evaluate_trained_model(
     model,
     test_env,
     n_eval_episodes: int = 10,
-    initial_capital: float = 100000
+    initial_capital: float = 100000,
+    *,
+    deterministic: bool = True,
 ) -> Dict:
     """
     Evaluate a trained model on test environment.
@@ -265,6 +268,7 @@ def evaluate_trained_model(
         test_env: Test environment (StockTradingEnv or ETFTradingEnv)
         n_eval_episodes: Number of episodes to run
         initial_capital: Starting capital
+        deterministic: When False, sample stochastic policy actions (useful for SAC intraday runs)
     
     Returns:
         Dictionary with metrics, equity_curve, trade_history
@@ -277,45 +281,32 @@ def evaluate_trained_model(
     all_trades = []
     
     for episode in range(n_eval_episodes):
-        # Reset environment
-        obs = test_env.reset()
-        if isinstance(obs, tuple):
-            obs = obs[0]
-        
-        done = False
+        obs, _ = test_env.reset()
+        terminated = False
+        truncated = False
         episode_equity = [initial_capital]
         episode_trades = []
-        episode_actions = []
         
         step = 0
         prev_portfolio_value = initial_capital
-        
-        while not done:
+        while not (terminated or truncated):
             # Predict action (deterministic)
-            action, _ = model.predict(obs, deterministic=True)
-            
-            # Step environment
-            step_result = test_env.step(action)
-            
-            # Handle different gym versions
-            if len(step_result) == 5:
-                obs, reward, terminated, truncated, info = step_result
-                done = terminated or truncated
-            else:
-                obs, reward, done, info = step_result
-            
+            action, _ = model.predict(obs, deterministic=deterministic)
+
+            obs, reward, terminated, truncated, info = test_env.step(action)
+
             # Track portfolio value
             current_portfolio_value = info.get('portfolio_value', info.get('total_value', prev_portfolio_value))
             episode_equity.append(current_portfolio_value)
-            
+
             # Track trades (when portfolio changes significantly)
             pnl = current_portfolio_value - prev_portfolio_value
             if abs(pnl) > 0.01:  # Track if change > $0.01
                 episode_trades.append(float(pnl))
-            
+
             prev_portfolio_value = current_portfolio_value
             step += 1
-        
+
         all_equity_curves.append(episode_equity)
         all_trades.extend(episode_trades)
     

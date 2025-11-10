@@ -30,11 +30,11 @@ Wiring:
 - Receives data from feature_engineering.py
 """
 
-import gym
+import gymnasium as gym
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 
 class BaseTradingEnv(gym.Env, ABC):
@@ -57,7 +57,7 @@ class BaseTradingEnv(gym.Env, ABC):
         self,
         df: pd.DataFrame,
         initial_capital: float = 100000.0,
-    commission: Union[float, Dict[str, float]] = 1.0,
+        commission: Union[float, Dict[str, float]] = 1.0,
         max_position_size: float = 1.0,
         normalize_obs: bool = True,
         history_config: Optional[Dict] = None
@@ -310,13 +310,10 @@ class BaseTradingEnv(gym.Env, ABC):
 
         return metrics
     
-    def reset(self) -> np.ndarray:
-        """
-        Reset environment to initial state.
-        
-        Returns:
-            Initial observation
-        """
+    def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        """Reset environment state and return the initial observation with metadata."""
+        super().reset(seed=seed, options=options)
+
         self.current_step = 0
         self.cash = self.initial_capital
         self.holdings = 0
@@ -333,21 +330,11 @@ class BaseTradingEnv(gym.Env, ABC):
         if self.normalize_obs and self.obs_mean is None:
             self._calculate_normalization_params()
         
-        return self._get_observation()
+        obs = self._get_observation()
+        return obs, {}
     
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
-        """
-        Execute one step in the environment.
-        
-        Args:
-            action: 0=HOLD, 1=BUY, 2=SELL
-            
-        Returns:
-            observation: Current state
-            reward: Reward for this step
-            done: Whether episode is complete
-            info: Additional information
-        """
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        """Execute one step and return Gymnasium-style transition tuple."""
         # Get current price
         # Support both 'close' and 'price' column names
         if 'close' in self.df.columns:
@@ -381,7 +368,8 @@ class BaseTradingEnv(gym.Env, ABC):
         
         # Move to next step
         self.current_step += 1
-        done = self.current_step >= self.n_steps - 1
+        terminated = self.current_step >= self.n_steps - 1
+        truncated = False
         
         # Get next observation
         obs = self._get_observation()
@@ -396,7 +384,7 @@ class BaseTradingEnv(gym.Env, ABC):
             'action': action
         }
         
-        return obs, reward, done, info
+        return obs, reward, terminated, truncated, info
     
     def _execute_action(self, action: int, current_price: float):
         """
