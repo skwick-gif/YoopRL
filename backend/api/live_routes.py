@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -23,6 +25,9 @@ _AGENT_MANAGER: Optional[AgentManager] = None
 _DB: Optional[DatabaseManager] = None
 _MODEL_MANAGER: Optional[ModelManager] = None
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_CANDLE_CACHE: dict[str, dict[str, Any]] = {}
+_CANDLE_CACHE_META: dict[str, dict[str, Any]] = {}
+_TICK_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -38,6 +43,112 @@ def _coerce_bool(value: Any) -> bool:
         return bool(int(value))
     except (TypeError, ValueError):
         return bool(value)
+
+
+def _parse_bar_timestamp(value: Any) -> Optional[str]:
+    """Translate bridge bar timestamps into ISO-8601 UTC strings."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            numeric = float(value)
+            # IBKR can emit milliseconds; normalise to seconds range
+            if numeric > 1e12:
+                numeric /= 1000.0
+            moment = datetime.fromtimestamp(numeric, tz=timezone.utc)
+            return moment.isoformat()
+        except (ValueError, OSError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    normalised = " ".join(text.split())
+    patterns = (
+        "%Y%m%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%d %H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y%m%d",
+        "%Y-%m-%d",
+    )
+
+    for pattern in patterns:
+        try:
+            moment = datetime.strptime(normalised, pattern)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            else:
+                moment = moment.astimezone(timezone.utc)
+            return moment.isoformat()
+        except ValueError:
+            continue
+
+    try:
+        cleaned = normalised.replace('Z', '+00:00')
+        moment = datetime.fromisoformat(cleaned)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        else:
+            moment = moment.astimezone(timezone.utc)
+        return moment.isoformat()
+    except ValueError:
+        return None
+
+
+def _normalise_bar(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract OHLC values from bridge payload entries."""
+
+    def _to_float(raw: Any) -> Optional[float]:
+        if raw in (None, "", "nan", "NaN"):
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _to_int(raw: Any) -> Optional[int]:
+        value = _to_float(raw)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    time_value = (
+        payload.get('time')
+        or payload.get('Time')
+        or payload.get('timestamp')
+        or payload.get('Timestamp')
+        or payload.get('date')
+        or payload.get('Date')
+    )
+    iso_time = _parse_bar_timestamp(time_value)
+    if iso_time is None:
+        return None
+
+    open_px = _to_float(payload.get('open') or payload.get('Open'))
+    high_px = _to_float(payload.get('high') or payload.get('High'))
+    low_px = _to_float(payload.get('low') or payload.get('Low'))
+    close_px = _to_float(payload.get('close') or payload.get('Close'))
+    if any(value is None for value in (open_px, high_px, low_px, close_px)):
+        return None
+
+    volume = _to_int(payload.get('volume') or payload.get('Volume'))
+
+    return {
+        'time': iso_time,
+        'open': open_px,
+        'high': high_px,
+        'low': low_px,
+        'close': close_px,
+        'volume': volume,
+    }
 
 
 def register_live_routes(
@@ -202,6 +313,13 @@ def create_live_agent():
         if 'benchmark_symbol' in overrides and overrides['benchmark_symbol']:
             overrides['benchmark_symbol'] = str(overrides['benchmark_symbol']).upper()
 
+        if 'auto_restart' in overrides:
+            auto_restart_flag = _coerce_bool(overrides['auto_restart'])
+            overrides['auto_restart'] = auto_restart_flag
+        else:
+            auto_restart_flag = _coerce_bool(data.get('auto_restart', True))
+            overrides['auto_restart'] = auto_restart_flag
+
         agent_id = data.get('agent_id')
         if not agent_id:
             agent_prefix = str(metadata.get('agent_type', 'AGENT')).upper()
@@ -216,7 +334,11 @@ def create_live_agent():
             overrides=overrides,
         )
 
-        _AGENT_MANAGER.create_agent(config=config, start_immediately=start_immediately)
+        _AGENT_MANAGER.create_agent(
+            config=config,
+            start_immediately=start_immediately,
+            auto_restart=auto_restart_flag,
+        )
         status = _AGENT_MANAGER.get_agent(agent_id).get_status()
         started_flag = bool(status.get('is_running'))
         if started_flag:
@@ -418,23 +540,243 @@ def get_agent_ticks(agent_id: str):
         'durationSeconds': duration,
     }
 
+    timeout_seconds = max(5, min(duration + 5, 180))  # bridge collects ticks for `duration`, so extend read timeout accordingly
+
+    request_started = time.monotonic()
     try:
-        response = requests.get(url, params=params, timeout=3)
+        response = requests.get(
+            url,
+            params=params,
+            timeout=(2, timeout_seconds),
+        )
         response.raise_for_status()
         payload = response.json()
     except requests.exceptions.Timeout:
-        return jsonify({'status': 'error', 'error': 'Bridge request timed out'}), 504
+        cached = _TICK_CACHE.get(agent_id)
+        cached_ticks = cached.get('ticks') if cached else []
+        cached_stamp = cached.get('fetched_at').isoformat() if cached and cached.get('fetched_at') else None
+        _LOGGER.warning(
+            "Bridge tick request timed out for agent %s (symbol=%s, duration=%ss). Returning %d cached ticks.",
+            agent_id,
+            getattr(trader.config, 'symbol', 'UNKNOWN'),
+            duration,
+            len(cached_ticks),
+        )
+        return jsonify({
+            'status': 'warning',
+            'agent_id': agent_id,
+            'symbol': trader.config.symbol,
+            'ticks': cached_ticks,
+            'cached': bool(cached_ticks),
+            'cached_at': cached_stamp,
+            'message': 'Bridge request timed out',
+            'latency_ms': int((time.monotonic() - request_started) * 1000),
+        }), 200
     except requests.exceptions.RequestException as exc:
+        cached = _TICK_CACHE.get(agent_id)
+        cached_ticks = cached.get('ticks') if cached else []
+        cached_stamp = cached.get('fetched_at').isoformat() if cached and cached.get('fetched_at') else None
         _LOGGER.debug("Bridge market data request failed: %s", exc)
+        if cached_ticks:
+            return jsonify({
+                'status': 'warning',
+                'agent_id': agent_id,
+                'symbol': trader.config.symbol,
+                'ticks': cached_ticks,
+                'cached': True,
+                'cached_at': cached_stamp,
+                'message': str(exc),
+                'latency_ms': int((time.monotonic() - request_started) * 1000),
+            }), 200
         return jsonify({'status': 'error', 'error': str(exc)}), 502
     except ValueError:
         return jsonify({'status': 'error', 'error': 'Bridge returned non-JSON payload'}), 502
 
     ticks = payload if isinstance(payload, list) else payload.get('ticks', []) if isinstance(payload, dict) else []
 
+    elapsed_ms = int((time.monotonic() - request_started) * 1000)
+    now_utc = datetime.now(timezone.utc)
+
+    if ticks:
+        _TICK_CACHE[agent_id] = {
+            'ticks': ticks,
+            'fetched_at': now_utc,
+            'duration': duration,
+            'sec_type': sec_type,
+            'exchange': exchange,
+        }
+
     return jsonify({
         'status': 'success',
         'agent_id': agent_id,
         'symbol': trader.config.symbol,
         'ticks': ticks,
+        'latency_ms': elapsed_ms,
+        'fetched_at': now_utc.isoformat(),
+    }), 200
+
+
+@_live_bp.route('/agents/<agent_id>/candles', methods=['GET'])
+def get_agent_candles(agent_id: str):
+    if _AGENT_MANAGER is None:
+        raise RuntimeError("Live routes not initialised with agent manager")
+
+    try:
+        trader = _AGENT_MANAGER.get_agent(agent_id)
+    except KeyError as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 404
+
+    duration_days = request.args.get('durationDays') or request.args.get('duration_days')
+    try:
+        duration_days = int(duration_days) if duration_days is not None else 3
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'error': 'durationDays must be an integer'}), 400
+    duration_days = max(1, min(duration_days, 30))
+
+    bar_size = request.args.get('barSize') or request.args.get('bar_size') or '15 mins'
+    bar_size = str(bar_size).strip() or '15 mins'
+
+    limit = request.args.get('limit', default=160, type=int) or 160
+    limit = max(16, min(limit, 400))
+
+    extras = trader.config.extras if isinstance(trader.config.extras, dict) else {}
+
+    sec_type = (
+        request.args.get('secType')
+        or request.args.get('sec_type')
+        or extras.get('sec_type')
+        or extras.get('secType')
+        or extras.get('security_type')
+        or extras.get('securityType')
+        or 'STK'
+    )
+    if isinstance(sec_type, str):
+        sec_type = sec_type.upper()
+
+    exchange = (
+        request.args.get('exchange')
+        or extras.get('exchange')
+        or extras.get('primary_exchange')
+        or extras.get('primaryExchange')
+        or 'SMART'
+    )
+    if isinstance(exchange, str):
+        exchange = exchange.upper()
+
+    bridge_host = request.args.get('bridge_host') or getattr(trader.config, 'bridge_host', 'localhost') or 'localhost'
+    bridge_port = request.args.get('bridge_port') or getattr(trader.config, 'bridge_port', 5080) or 5080
+
+    try:
+        bridge_port = int(bridge_port)
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'error': 'Invalid bridge_port value'}), 400
+
+    url = f"http://{bridge_host}:{bridge_port}/historical"
+    params = {
+        'symbol': trader.config.symbol,
+        'secType': sec_type,
+        'exchange': exchange,
+        'durationDays': duration_days,
+        'barSize': bar_size,
+    }
+
+    # Historical endpoint loops over multiple whatToShow combinations; give it ample time.
+    read_timeout = max(30, min(duration_days * 40, 240))
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=(2, read_timeout),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.Timeout:
+        cached = _CANDLE_CACHE.get(agent_id)
+        cached_meta = _CANDLE_CACHE_META.get(agent_id, {})
+        cached_bars = cached.get('bars') if cached else []
+        cached_stamp = cached_meta.get('fetched_at')
+        _LOGGER.warning(
+            "Bridge historical request timed out for agent %s (symbol=%s, barSize=%s). Returning %d cached bars.",
+            agent_id,
+            getattr(trader.config, 'symbol', 'UNKNOWN'),
+            bar_size,
+            len(cached_bars),
+        )
+        return jsonify({
+            'status': 'warning',
+            'agent_id': agent_id,
+            'symbol': trader.config.symbol,
+            'bar_size': bar_size,
+            'duration_days': duration_days,
+            'count': len(cached_bars),
+            'sec_type': sec_type,
+            'exchange': exchange,
+            'bars': cached_bars,
+            'cached': bool(cached_bars),
+            'cached_at': cached_stamp,
+            'message': 'Bridge request timed out',
+        }), 200
+    except requests.exceptions.RequestException as exc:
+        cached = _CANDLE_CACHE.get(agent_id)
+        cached_meta = _CANDLE_CACHE_META.get(agent_id, {})
+        cached_bars = cached.get('bars') if cached else []
+        cached_stamp = cached_meta.get('fetched_at')
+        _LOGGER.debug("Bridge historical data request failed: %s", exc)
+        if cached_bars:
+            return jsonify({
+                'status': 'warning',
+                'agent_id': agent_id,
+                'symbol': trader.config.symbol,
+                'bar_size': bar_size,
+                'duration_days': duration_days,
+                'count': len(cached_bars),
+                'sec_type': sec_type,
+                'exchange': exchange,
+                'bars': cached_bars,
+                'cached': True,
+                'cached_at': cached_stamp,
+                'message': str(exc),
+            }), 200
+        return jsonify({'status': 'error', 'error': str(exc)}), 502
+    except ValueError:
+        return jsonify({'status': 'error', 'error': 'Bridge returned non-JSON payload'}), 502
+
+    raw_bars = []
+    if isinstance(payload, dict):
+        raw_bars = payload.get('Bars') or payload.get('bars') or []
+    elif isinstance(payload, list):
+        raw_bars = payload
+
+    normalised = []
+    for item in raw_bars:
+        if not isinstance(item, dict):
+            continue
+        bar = _normalise_bar(item)
+        if bar is None:
+            continue
+        normalised.append(bar)
+
+    if normalised:
+        normalised = normalised[-limit:]
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        _CANDLE_CACHE[agent_id] = {'bars': normalised}
+        _CANDLE_CACHE_META[agent_id] = {
+            'fetched_at': fetched_at,
+            'bar_size': bar_size,
+            'duration_days': duration_days,
+            'sec_type': sec_type,
+            'exchange': exchange,
+        }
+
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'symbol': trader.config.symbol,
+        'bar_size': bar_size,
+        'duration_days': duration_days,
+        'count': len(normalised),
+        'sec_type': sec_type,
+        'exchange': exchange,
+        'bars': normalised,
     }), 200

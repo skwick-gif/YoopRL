@@ -26,6 +26,7 @@
 import React from 'react';
 import { ParamItem, Card } from '../common/UIComponents';
 import ConfigManager from './ConfigManager';
+import { DEFAULT_COMMISSION_CONFIG } from '../../hooks/useTrainingState';
 
 const headerRowStyle = {
   display: 'flex',
@@ -317,14 +318,18 @@ function HyperparameterGrid({ agentType, trainingState, onLoadConfig, isIntraday
               title="End Date: The last date of historical data for training. Usually set to today or recent date. More data = better learning."
             />
           </ParamItem>
-          <ParamItem label="Commission">
+          <ParamItem label="Commission ($/share)">
             <input 
               type="number" 
               className="param-input" 
               value={trainingState.commission}
-              onChange={(e) => trainingState.setCommission(parseFloat(e.target.value))}
-              step="0.1"
-              title="Commission Fee: Cost per trade in dollars. This is deducted from profits during training. Set to match your broker's actual fees (e.g., $1-$5 per trade)."
+              onChange={(e) => {
+                const nextValue = Number.parseFloat(e.target.value);
+                trainingState.setCommission(Number.isFinite(nextValue) ? nextValue : DEFAULT_COMMISSION_CONFIG.per_share);
+              }}
+              step="0.001"
+              min="0"
+              title="Commission per share in USD. Default aligns with IBKR tiered equities pricing (0.01 $/share, $2.50 minimum, 1% cap)."
             />
           </ParamItem>
           <ParamItem label="Optuna Trials">

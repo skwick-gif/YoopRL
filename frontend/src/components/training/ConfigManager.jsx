@@ -12,6 +12,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
+import { DEFAULT_COMMISSION_CONFIG } from '../../hooks/useTrainingState';
 
 const todayIso = () => new Date().toISOString().split('T')[0];
 
@@ -21,6 +22,11 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
 
   // Preset configurations - different for PPO (stocks) and SAC (ETFs)
   const defaultEndDate = todayIso();
+  const buildCommissionConfig = (perShare = DEFAULT_COMMISSION_CONFIG.per_share) => ({
+    per_share: perShare,
+    min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+    max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+  });
 
   const presets = {
     PPO: {
@@ -66,7 +72,67 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2018-01-01',
             end_date: defaultEndDate,
-            commission: 1.0,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
+              commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+              commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+              commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+              commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 120,
             max_position_size: 0.7
           }
@@ -114,7 +180,19 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2020-01-01',
             end_date: defaultEndDate,
-            commission: 0.5,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 80,
             max_position_size: 1.0
           }
@@ -162,7 +240,11 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2019-01-01',
             end_date: defaultEndDate,
-            commission: 0.75,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 100,
             max_position_size: 0.85
           }
@@ -213,7 +295,11 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2020-01-01',
             end_date: defaultEndDate,
-            commission: 1.2,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 120,
             max_position_size: 0.7
           }
@@ -262,7 +348,11 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2021-01-01',
             end_date: defaultEndDate,
-            commission: 1.5,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 90,
             max_position_size: 1.0
           }
@@ -311,7 +401,11 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
           training_settings: {
             start_date: '2020-06-01',
             end_date: defaultEndDate,
-            commission: 1.25,
+            commission: buildCommissionConfig(DEFAULT_COMMISSION_CONFIG.per_share),
+            commission_per_share: DEFAULT_COMMISSION_CONFIG.per_share,
+            commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+            commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+            commission_model: 'ibkr_tiered_us_equities',
             optuna_trials: 110,
             max_position_size: 0.85
           }

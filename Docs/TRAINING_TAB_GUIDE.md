@@ -233,10 +233,11 @@ Result:     ~1,250 trading days
 ```
 
 #### Commission
-- **Default:** $1.00 per trade
-- **Range:** $0 - $10
-- **Why:** Realistic commission costs improve real-world performance
-- **Note:** Interactive Brokers charges ~$1-5 per trade
+- **Default:** $0.01 per share (IBKR tiered equities)
+- **Floor:** $2.50 minimum per order (applied automatically)
+- **Cap:** 1% of trade notional (auto-clamped)
+- **Why:** Realistic execution fees improve live-to-sim alignment
+- **Tip:** Adjust per-share rate if your venue differs; min fee remains 2.50 by default
 
 #### Optuna Trials
 - **Default:** 100 trials

@@ -31,6 +31,12 @@ import { useState } from 'react';
 
 const ALLOWED_INTRADAY_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'TNA', 'UPRO', 'TQQQ', 'DIA', 'UDOW'];
 
+export const DEFAULT_COMMISSION_CONFIG = Object.freeze({
+  per_share: 0.01,
+  min_fee: 2.5,
+  max_pct: 0.01,
+});
+
 export const useTrainingState = () => {
   // ===== PPO Hyperparameters (Stock Trading) =====
   const [ppoSymbol, setPpoSymbol] = useState('AAPL');
@@ -70,7 +76,7 @@ export const useTrainingState = () => {
   
   const [startDate, setStartDate] = useState('2020-01-01');  // Always start from 2020
   const [endDate, setEndDate] = useState(getCurrentDate());   // Always current date
-  const [commission, setCommission] = useState(1.0);
+  const [commission, setCommission] = useState(DEFAULT_COMMISSION_CONFIG.per_share);
   const [optunaTrials, setOptunaTrials] = useState(100);
 
   // ===== Feature Selection =====
@@ -152,6 +158,17 @@ export const useTrainingState = () => {
     const parsedSacEpisodes = parseInt(sacEpisodes, 10);
     const resolvedSacEpisodes = Number.isNaN(parsedSacEpisodes) ? 45000 : parsedSacEpisodes;
 
+    const perShare = Number.parseFloat(commission);
+    const normalizedPerShare = Number.isFinite(perShare)
+      ? perShare
+      : DEFAULT_COMMISSION_CONFIG.per_share;
+
+    const commissionPayload = {
+      per_share: normalizedPerShare,
+      min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+      max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+    };
+
     const config = {
       agent_type: resolvedAgentType,
       symbol: (resolvedAgentType === 'PPO' ? ppoSymbol : sacSymbol) || '',
@@ -222,7 +239,11 @@ export const useTrainingState = () => {
       training_settings: {
         start_date: startDate,
         end_date: endDate,
-        commission: parseFloat(commission),
+        commission: commissionPayload,
+        commission_per_share: normalizedPerShare,
+        commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+        commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+        commission_model: 'ibkr_tiered_us_equities',
         optuna_trials: parseInt(optunaTrials, 10)
       }
     };
@@ -281,7 +302,7 @@ export const useTrainingState = () => {
 
     // Validate commission
     if (commission < 0) {
-      errors.push('Commission cannot be negative');
+      errors.push('Commission per share cannot be negative');
     }
 
     // Validate Optuna trials
@@ -335,7 +356,7 @@ export const useTrainingState = () => {
     // Training settings defaults
     setStartDate('2023-01-01');
     setEndDate('2024-11-01');
-    setCommission(1.0);
+  setCommission(DEFAULT_COMMISSION_CONFIG.per_share);
     setOptunaTrials(100);
 
     // Features defaults

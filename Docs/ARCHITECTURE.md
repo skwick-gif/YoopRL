@@ -114,7 +114,7 @@ Date  | Open | High | Low | Close | Volume | RSI | MACD | ...
 - Goal: maximize Sharpe ratio
 
 **Trading rules:**
-- Commission: 0.1% per trade
+- Commission: IBKR tiered (0.01 $/share, $2.50 min, 1% cap)
 - No short selling
 - Max 100% of capital
 

@@ -18,7 +18,7 @@
  * - UIComponents: shared Button and Card primitives for consistent styling
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card } from './common/UIComponents';
 import liveAPI from '../services/liveAPI';
 
@@ -439,146 +439,528 @@ function TradingWindowControls({ agent, isUpdating, onToggle }) {
   );
 }
 
+const TIMEFRAMES_MINUTES = [1, 5, 10, 15];
+const BAR_SIZE_LABEL = {
+  1: '1 min',
+  5: '5 mins',
+  10: '10 mins',
+  15: '15 mins',
+};
+const MAX_TIMEFRAME_MINUTES = 15;
+const MAX_CANDLES = 200;
+
 function LiveTickChart({ agentId, symbol, isRunning, forceStreaming }) {
-  const [series, setSeries] = useState([]);
+  const [timeframe, setTimeframe] = useState(15);
+  const [historicalCandles, setHistoricalCandles] = useState([]);
+  const [candles, setCandles] = useState([]);
+  const [ticks, setTicks] = useState([]);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [error, setError] = useState(null);
+  const [tickError, setTickError] = useState(null);
+  const [candleWarning, setCandleWarning] = useState(null);
+  const [tickWarning, setTickWarning] = useState(null);
+  const [tickLatencyMs, setTickLatencyMs] = useState(null);
   const isActive = isRunning || forceStreaming;
 
-  const fetchTicks = useCallback(async () => {
-    const payload = await liveAPI.fetchTicks(agentId, { duration: 20 });
-    const container = Array.isArray(payload?.ticks)
-      ? payload.ticks
-      : Array.isArray(payload)
-        ? payload
-        : [];
+  const newestTickRef = useRef(0);
+  const pollingRef = useRef(false);
 
-    const points = [];
-    container.forEach((tick) => {
-      const rawPrice = tick?.Price ?? tick?.price ?? tick?.lastPrice ?? tick?.close;
-      const price = Number(rawPrice);
-      if (!Number.isFinite(price)) {
+  const parseHistorical = useCallback((bars, minutes) => {
+    const bucketMs = minutes * 60 * 1000;
+    const parsed = [];
+    bars.forEach((bar) => {
+      if (!bar) {
         return;
       }
-      const rawTime = tick?.Time ?? tick?.time ?? tick?.timestamp;
-      const timestamp = rawTime ? new Date(rawTime) : new Date();
-      points.push({ price, time: timestamp });
+      const open = Number(bar.open ?? bar.Open);
+      const high = Number(bar.high ?? bar.High);
+      const low = Number(bar.low ?? bar.Low);
+      const close = Number(bar.close ?? bar.Close);
+      if (![open, high, low, close].every(Number.isFinite)) {
+        return;
+      }
+      const rawTime = bar.time ?? bar.Time ?? bar.timestamp ?? bar.Timestamp;
+      const ts = rawTime ? new Date(rawTime) : null;
+      if (!ts || Number.isNaN(ts.getTime())) {
+        return;
+      }
+      const bucket = Math.floor(ts.getTime() / bucketMs) * bucketMs;
+      const volumeRaw = Number(bar.volume ?? bar.Volume);
+      parsed.push({
+        time: new Date(bucket),
+        open,
+        high,
+        low,
+        close,
+        volume: Number.isFinite(volumeRaw) ? volumeRaw : null,
+      });
+    });
+    return parsed.slice(-MAX_CANDLES);
+  }, []);
+
+  const loadHistorical = useCallback(async (minutes) => {
+    try {
+      const payload = await liveAPI.fetchCandles(agentId, {
+        durationDays: minutes <= 1 ? 1 : 3,
+        barSize: BAR_SIZE_LABEL[minutes] || '15 mins',
+        limit: MAX_CANDLES,
+      });
+      const bars = Array.isArray(payload?.bars)
+        ? payload.bars
+        : Array.isArray(payload)
+          ? payload
+          : [];
+      const parsed = parseHistorical(bars, minutes);
+      setHistoricalCandles(parsed);
+      setError(null);
+      if (payload?.status === 'warning') {
+        const note = buildBridgeWarning('candles', payload);
+        setCandleWarning(note);
+      } else {
+        setCandleWarning(null);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to load historical candles');
+      setHistoricalCandles([]);
+      setCandleWarning(null);
+    }
+  }, [agentId, parseHistorical]);
+
+  const aggregateTicks = useCallback((tickList, minutes) => {
+    if (tickList.length === 0) {
+      return [];
+    }
+    const bucketMs = minutes * 60 * 1000;
+    const buckets = new Map();
+
+    tickList.forEach((tick) => {
+      const ms = tick.time.getTime();
+      const bucket = Math.floor(ms / bucketMs) * bucketMs;
+      const existing = buckets.get(bucket);
+      if (!existing) {
+        buckets.set(bucket, {
+          time: new Date(bucket),
+          open: tick.price,
+          high: tick.price,
+          low: tick.price,
+          close: tick.price,
+          volume: tick.volume ?? null,
+        });
+      } else {
+        existing.high = Math.max(existing.high, tick.price);
+        existing.low = Math.min(existing.low, tick.price);
+        existing.close = tick.price;
+        if (typeof tick.volume === 'number') {
+          existing.volume = (existing.volume ?? 0) + tick.volume;
+        }
+      }
     });
 
-    const maxPoints = 80;
-    return points.slice(-maxPoints);
-  }, [agentId]);
+    return Array.from(buckets.values()).sort((a, b) => a.time.getTime() - b.time.getTime());
+  }, []);
+
+  const mergeCandles = useCallback((historical, liveCandles, minutes) => {
+    const bucketMs = minutes * 60 * 1000;
+    const map = new Map();
+
+    historical.forEach((bar) => {
+      const bucket = Math.floor(bar.time.getTime() / bucketMs) * bucketMs;
+      if (!map.has(bucket)) {
+        map.set(bucket, { ...bar, time: new Date(bucket) });
+      }
+    });
+
+    liveCandles.forEach((bar) => {
+      const bucket = Math.floor(bar.time.getTime() / bucketMs) * bucketMs;
+      map.set(bucket, { ...bar, time: new Date(bucket) });
+    });
+
+    return Array.from(map.values())
+      .sort((a, b) => a.time.getTime() - b.time.getTime())
+      .slice(-MAX_CANDLES);
+  }, []);
 
   useEffect(() => {
-    let timer;
-    let active = true;
-
-    const poll = async () => {
-      try {
-        const points = await fetchTicks();
-        if (!active) {
-          return;
-        }
-        setSeries(points);
-        setUpdatedAt(new Date());
-        setError(null);
-      } catch (err) {
-        if (!active) {
-          return;
-        }
-        setError(err.message || 'Failed to load ticks');
-      }
-    };
-
     if (!isActive) {
-      setSeries([]);
+      setHistoricalCandles([]);
+      setCandles([]);
+      setTicks([]);
       setUpdatedAt(null);
-      setError(null);
+      newestTickRef.current = 0;
       return undefined;
     }
 
-    poll();
-    timer = setInterval(poll, 5000);
+    loadHistorical(timeframe);
+    return undefined;
+  }, [isActive, timeframe, loadHistorical]);
 
-    return () => {
-      active = false;
-      if (timer) {
-        clearInterval(timer);
-      }
-    };
-  }, [fetchTicks, isActive]);
-
-  const WIDTH = 320;
-  const HEIGHT = 120;
-  const PADDING = 12;
-
-  const chartData = useMemo(() => {
-    if (series.length < 2) {
-      return { path: '', min: null, max: null };
+  useEffect(() => {
+    if (!isActive) {
+      return undefined;
     }
 
-    const prices = series.map((point) => point.price);
-    const minPrice = Math.min(...prices);
-    const maxPrice = Math.max(...prices);
-    const range = maxPrice - minPrice || Math.max(maxPrice * 0.001, 0.01);
+    let cancelled = false;
 
-    const commands = series
-      .map((point, index) => {
-        const x = (index / (series.length - 1)) * (WIDTH - PADDING * 2) + PADDING;
-        const normalized = (point.price - minPrice) / range;
-        const y = HEIGHT - PADDING - normalized * (HEIGHT - PADDING * 2);
-        const op = index === 0 ? 'M' : 'L';
-        return `${op}${x.toFixed(2)},${y.toFixed(2)}`;
-      })
-      .join(' ');
+    const poll = async () => {
+      if (pollingRef.current || cancelled) {
+        return;
+      }
+      pollingRef.current = true;
+      try {
+        const payload = await liveAPI.fetchTicks(agentId, { duration: 5 });
+        const container = Array.isArray(payload?.ticks)
+          ? payload.ticks
+          : Array.isArray(payload)
+            ? payload
+            : [];
 
-    return { path: commands, min: minPrice, max: maxPrice };
-  }, [series]);
+        const fresh = [];
+        let newest = newestTickRef.current;
+        container.forEach((tick) => {
+          const price = Number(tick?.Price ?? tick?.price ?? tick?.lastPrice ?? tick?.close);
+          if (!Number.isFinite(price)) {
+            return;
+          }
+          const rawTime = tick?.Time ?? tick?.time ?? tick?.timestamp;
+          const ts = rawTime ? new Date(rawTime) : null;
+          if (!ts || Number.isNaN(ts.getTime())) {
+            return;
+          }
+          const millis = ts.getTime();
+          if (millis <= newest) {
+            return;
+          }
+          const volume = Number(tick?.size ?? tick?.Size ?? tick?.volume ?? tick?.Volume);
+          fresh.push({
+            time: ts,
+            price,
+            volume: Number.isFinite(volume) ? volume : null,
+          });
+          newest = Math.max(newest, millis);
+        });
 
-  const lastPoint = series.length ? series[series.length - 1] : null;
+        if (fresh.length) {
+          newestTickRef.current = newest;
+          const maxWindow = MAX_TIMEFRAME_MINUTES * 60 * 1000;
+          setTicks((prev) => {
+            const merged = [...prev, ...fresh];
+            const cutoff = newest - maxWindow;
+            return merged
+              .filter((tick) => tick.time.getTime() >= cutoff)
+              .sort((a, b) => a.time.getTime() - b.time.getTime());
+          });
+        }
+        setTickError(null);
+        if (payload?.status === 'warning') {
+          const note = buildBridgeWarning('ticks', payload);
+          setTickWarning(note);
+        } else {
+          setTickWarning(null);
+        }
+        if (payload?.latency_ms) {
+          setTickLatencyMs(Number(payload.latency_ms) || null);
+        } else if (payload?.cached && payload?.cached_at) {
+          const cachedTs = new Date(payload.cached_at).getTime();
+          if (!Number.isNaN(cachedTs)) {
+            setTickLatencyMs(Date.now() - cachedTs);
+          }
+        } else {
+          setTickLatencyMs(null);
+        }
+      } catch (err) {
+        setTickError(err.message || 'Failed to stream live ticks');
+        setTickWarning(null);
+        setTickLatencyMs(null);
+      } finally {
+        pollingRef.current = false;
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 6000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [agentId, isActive]);
+
+  useEffect(() => {
+    if (!isActive) {
+      return;
+    }
+    const liveCandles = aggregateTicks(ticks, timeframe);
+    const combined = mergeCandles(historicalCandles, liveCandles, timeframe);
+    setCandles(combined);
+
+    if (liveCandles.length) {
+      setUpdatedAt(liveCandles[liveCandles.length - 1].time);
+    } else if (combined.length) {
+      setUpdatedAt(combined[combined.length - 1].time);
+    }
+  }, [ticks, historicalCandles, timeframe, isActive, aggregateTicks, mergeCandles]);
+
+  const CHART_WIDTH = 360;
+  const CHART_HEIGHT = 180;
+  const LEFT_AXIS = 52;
+  const RIGHT_PADDING = 12;
+  const TOP_PADDING = 12;
+  const BOTTOM_AXIS = 28;
+
+  const metrics = useMemo(() => {
+    if (candles.length === 0) {
+      return null;
+    }
+    const highs = candles.map((bar) => bar.high);
+    const lows = candles.map((bar) => bar.low);
+    const maxHigh = Math.max(...highs);
+    const minLow = Math.min(...lows);
+    const rawRange = maxHigh - minLow;
+    const range = rawRange > 0 ? rawRange : Math.max(Math.abs(maxHigh) * 0.001, 0.01);
+    const plotWidth = CHART_WIDTH - LEFT_AXIS - RIGHT_PADDING;
+    const plotHeight = CHART_HEIGHT - TOP_PADDING - BOTTOM_AXIS;
+    const segments = Math.max(1, candles.length - 1);
+    const spacing = candles.length === 1 ? 0 : plotWidth / segments;
+    const bodyWidth = candles.length === 1
+      ? Math.min(22, Math.max(6, plotWidth * 0.3))
+      : Math.min(18, Math.max(4, spacing * 0.6));
+    const priceTickCount = 4;
+    const priceTicks = Array.from({ length: priceTickCount + 1 }, (_, idx) => {
+      const value = maxHigh - (range * idx) / priceTickCount;
+      const y = TOP_PADDING + (plotHeight * idx) / priceTickCount;
+      return { value, y };
+    });
+    const timeTickCount = Math.min(5, candles.length);
+    const timeTickIndices = [];
+    if (timeTickCount === 1) {
+      timeTickIndices.push(0);
+    } else {
+      const step = Math.max(1, Math.floor((candles.length - 1) / (timeTickCount - 1)));
+      for (let i = 0; i < candles.length; i += step) {
+        timeTickIndices.push(i);
+      }
+      const lastIndex = candles.length - 1;
+      if (timeTickIndices[timeTickIndices.length - 1] !== lastIndex) {
+        timeTickIndices.push(lastIndex);
+      }
+    }
+    const timeTicks = timeTickIndices.map((idx, position) => {
+      const bar = candles[idx];
+      const label = position === 0
+        ? bar.time.toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+        : bar.time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return { index: idx, label };
+    });
+    return {
+      maxHigh,
+      minLow,
+      range,
+      spacing,
+      bodyWidth,
+      plotWidth,
+      plotHeight,
+      priceTicks,
+      timeTicks,
+      count: candles.length,
+    };
+  }, [candles]);
+
+  const priceToY = useCallback((price) => {
+    if (!metrics) {
+      return CHART_HEIGHT / 2;
+    }
+    const normalized = (metrics.maxHigh - price) / metrics.range;
+    const clamped = Math.max(0, Math.min(1, normalized));
+    return TOP_PADDING + clamped * metrics.plotHeight;
+  }, [metrics]);
+
+  const xForIndex = useCallback((index) => {
+    if (!metrics) {
+      return LEFT_AXIS;
+    }
+    if (metrics.count === 1) {
+      return LEFT_AXIS + metrics.plotWidth / 2;
+    }
+    return LEFT_AXIS + index * metrics.spacing;
+  }, [metrics]);
+
+  const lastCandle = candles.length ? candles[candles.length - 1] : null;
+  const combinedError = error || tickError;
 
   return (
     <div style={{ background: '#161b22', borderRadius: '6px', padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ color: '#8b949e', fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
-          {symbol} Live Ticks
-        </span>
-        {updatedAt && isActive && (
-          <span style={{ color: '#6e7681', fontSize: '11px' }}>Updated {updatedAt.toLocaleTimeString()}</span>
-        )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ color: '#8b949e', fontSize: '12px', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            {symbol} · {timeframe}m Candles
+          </span>
+          {updatedAt && isActive && (
+            <span style={{ color: '#6e7681', fontSize: '11px' }}>Updated {updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: '6px' }}>
+          {TIMEFRAMES_MINUTES.map((value) => {
+            const active = value === timeframe;
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setTimeframe(value)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '4px',
+                  border: active ? '1px solid #58a6ff' : '1px solid #30363d',
+                  background: active ? 'rgba(88, 166, 255, 0.15)' : 'transparent',
+                  color: active ? '#58a6ff' : '#c9d1d9',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                }}
+              >
+                {value}m
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {!isActive && (
-        <div style={{ color: '#6e7681', fontSize: '12px' }}>Start the agent or live data streaming to view ticks.</div>
+        <div style={{ color: '#6e7681', fontSize: '12px' }}>Start the agent or live data streaming to view candles.</div>
       )}
 
-      {error && (
-        <div style={{ color: '#f85149', fontSize: '12px' }}>{error}</div>
+      {combinedError && (
+        <div style={{ color: '#f85149', fontSize: '12px' }}>{combinedError}</div>
       )}
 
-      {chartData.path && isActive && !error && (
-        <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width="100%" height="120" style={{ background: 'transparent' }}>
-          <rect x="0" y="0" width={WIDTH} height={HEIGHT} fill="rgba(88, 166, 255, 0.06)" rx="8" ry="8" />
-          <path d={chartData.path} fill="none" stroke="#58a6ff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {!combinedError && (candleWarning || tickWarning || Number.isFinite(tickLatencyMs)) && (
+        <div style={{ color: '#d29922', fontSize: '12px', lineHeight: 1.4 }}>
+          {candleWarning && <div>{candleWarning}</div>}
+          {tickWarning && <div>{tickWarning}</div>}
+          {Number.isFinite(tickLatencyMs) && tickLatencyMs > 3000 && (
+            <div>⚠️ אחרוני הטיקים התקבלו לפני {(tickLatencyMs / 1000).toFixed(1)} שניות.</div>
+          )}
+        </div>
+      )}
+
+      {metrics && candles.length > 0 && isActive && !combinedError && (
+        <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} width="100%" height="180" style={{ background: 'transparent' }}>
+          <rect x="0" y="0" width={CHART_WIDTH} height={CHART_HEIGHT} fill="rgba(88, 166, 255, 0.06)" rx="8" ry="8" />
+          <line
+            x1={LEFT_AXIS}
+            x2={LEFT_AXIS}
+            y1={TOP_PADDING}
+            y2={CHART_HEIGHT - BOTTOM_AXIS}
+            stroke="rgba(201, 209, 217, 0.3)"
+          />
+          <line
+            x1={LEFT_AXIS}
+            x2={CHART_WIDTH - RIGHT_PADDING}
+            y1={CHART_HEIGHT - BOTTOM_AXIS}
+            y2={CHART_HEIGHT - BOTTOM_AXIS}
+            stroke="rgba(201, 209, 217, 0.3)"
+          />
+          {metrics.priceTicks.map((tick, idx) => (
+            <g key={`price-${idx}`}>
+              <line
+                x1={LEFT_AXIS}
+                x2={CHART_WIDTH - RIGHT_PADDING}
+                y1={tick.y}
+                y2={tick.y}
+                stroke="rgba(201, 209, 217, 0.1)"
+              />
+              <text
+                x={LEFT_AXIS - 6}
+                y={tick.y + 4}
+                fontSize="10"
+                fill="#8b949e"
+                textAnchor="end"
+              >
+                {tick.value.toFixed(2)}
+              </text>
+            </g>
+          ))}
+          {metrics.timeTicks.map((tick, idx) => {
+            const x = xForIndex(tick.index);
+            return (
+              <g key={`time-${tick.index}`}>
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={CHART_HEIGHT - BOTTOM_AXIS}
+                  y2={CHART_HEIGHT - BOTTOM_AXIS + 6}
+                  stroke="rgba(201, 209, 217, 0.3)"
+                />
+                <text
+                  x={x}
+                  y={CHART_HEIGHT - 6}
+                  fontSize="10"
+                  fill="#8b949e"
+                  textAnchor="middle"
+                >
+                  {tick.label}
+                </text>
+              </g>
+            );
+          })}
+          {candles.map((bar, index) => {
+            const xCenter = xForIndex(index);
+            const bodyTop = priceToY(Math.max(bar.open, bar.close));
+            const bodyBottom = priceToY(Math.min(bar.open, bar.close));
+            const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+            const bodyX = xCenter - metrics.bodyWidth / 2;
+            const color = bar.close >= bar.open ? '#3fb950' : '#f85149';
+
+            return (
+              <rect
+                key={`${bar.time.toISOString()}_${index}`}
+                x={bodyX}
+                y={bodyTop}
+                width={metrics.bodyWidth}
+                height={bodyHeight}
+                fill={color}
+                stroke={color}
+                rx="2"
+              />
+            );
+          })}
         </svg>
       )}
 
-      {(!chartData.path || series.length < 2) && isActive && !error && (
-        <div style={{ color: '#6e7681', fontSize: '12px' }}>Collecting ticks...</div>
+      {(!metrics || candles.length === 0) && isActive && !combinedError && (
+        <div style={{ color: '#6e7681', fontSize: '12px' }}>Collecting live candles...</div>
       )}
 
-      {lastPoint && (
-        <div style={{ display: 'flex', gap: '12px', color: '#c9d1d9', fontSize: '13px' }}>
-          <span><strong>Last:</strong> ${lastPoint.price.toFixed(2)}</span>
-          {chartData.min !== null && chartData.max !== null && (
-            <span>
-              <strong>Range:</strong> ${chartData.min.toFixed(2)} — ${chartData.max.toFixed(2)}
-            </span>
-          )}
+      {lastCandle && (
+        <div style={{ display: 'flex', gap: '12px', color: '#c9d1d9', fontSize: '13px', flexWrap: 'wrap' }}>
+          <span><strong>Open:</strong> ${lastCandle.open.toFixed(2)}</span>
+          <span><strong>High:</strong> ${lastCandle.high.toFixed(2)}</span>
+          <span><strong>Low:</strong> ${lastCandle.low.toFixed(2)}</span>
+          <span><strong>Close:</strong> ${lastCandle.close.toFixed(2)}</span>
+          <span><strong>Time:</strong> {lastCandle.time.toLocaleString()}</span>
         </div>
       )}
     </div>
   );
+}
+
+function buildBridgeWarning(source, payload) {
+  const message = payload?.message || 'Bridge returned a warning';
+  let cachedStr = null;
+  if (payload?.cached) {
+    if (payload?.cached_at) {
+      const parsed = new Date(payload.cached_at);
+      cachedStr = Number.isNaN(parsed?.getTime()) ? 'recent cached data' : parsed.toLocaleString();
+    } else {
+      cachedStr = 'recent cached data';
+    }
+  }
+  if (cachedStr) {
+    return source === 'candles'
+      ? `⚠️ ${message}. Using cached candles from ${cachedStr}.`
+      : `⚠️ ${message}. Using cached ticks from ${cachedStr}.`;
+  }
+  return source === 'candles'
+    ? `⚠️ ${message}. No cached candles available yet.`
+    : `⚠️ ${message}. Waiting on fresh ticks…`;
 }
 
 export default TabLiveTrading;

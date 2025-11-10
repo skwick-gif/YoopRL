@@ -171,6 +171,21 @@ def get_training_date_range():
             bounds = db.get_market_date_bounds(symbol)
             interval = '1d'
 
+        if not bounds and frequency != 'intraday':
+            try:
+                import yfinance as yf
+
+                ticker = yf.Ticker(symbol)
+                history = ticker.history(period='max', interval='1d')
+                if not history.empty:
+                    bounds = {
+                        'min_date': history.index[0].date().isoformat(),
+                        'max_date': history.index[-1].date().isoformat(),
+                    }
+                    source = 'yfinance_fallback'
+            except Exception as exc:  # pragma: no cover - network fallback best effort
+                logger.warning('YFinance fallback failed for %s: %s', symbol, exc)
+
         if not bounds:
             return jsonify({
                 'status': 'not_found',
@@ -424,7 +439,11 @@ def start_training():
         "training_settings": {
             "start_date": "2023-01-01",
             "end_date": "2024-11-01",
-            "commission": 1.0,
+            "commission": {
+                "per_share": 0.01,
+                "min_fee": 2.5,
+                "max_pct": 0.01
+            },
             "initial_cash": 100000
         }
     }
@@ -670,6 +689,41 @@ def list_models():
         return jsonify({
             'status': 'error',
             'error': str(e)
+        }), 500
+
+
+@app.route('/api/training/models/<model_id>', methods=['DELETE'])
+def delete_model(model_id):
+    """Remove a trained model and associated metadata from disk."""
+
+    if not model_id:
+        return jsonify({
+            'status': 'error',
+            'error': 'model_id is required'
+        }), 400
+
+    try:
+        deleted = model_manager.delete_model(model_id)
+        if deleted:
+            return jsonify({
+                'status': 'success',
+                'deleted': True,
+                'model_id': model_id
+            }), 200
+
+        return jsonify({
+            'status': 'not_found',
+            'deleted': False,
+            'model_id': model_id,
+            'error': 'Model artifacts not found'
+        }), 404
+    except Exception as exc:
+        logger.error("Error deleting model %s: %s", model_id, exc)
+        return jsonify({
+            'status': 'error',
+            'deleted': False,
+            'model_id': model_id,
+            'error': str(exc)
         }), 500
 
 
@@ -986,6 +1040,14 @@ def run_backtest_endpoint():
                 or model_metadata.get('training_settings')
             )
         commission_payload = commission_payload or data.get('training_settings')
+        if not commission_payload and 'commission' in data:
+            commission_payload = {
+                'commission': data.get('commission'),
+                'commission_per_share': data.get('commission_per_share'),
+                'commission_min_fee': data.get('commission_min_fee'),
+                'commission_max_pct': data.get('commission_max_pct'),
+                'commission_model': data.get('commission_model'),
+            }
         
         # Run backtest
         results = run_backtest(

@@ -76,6 +76,26 @@ const liveAPI = {
     });
     return request(`/api/live/agents/${agentId}/ticks?${params.toString()}`);
   },
+
+  async fetchCandles(
+    agentId,
+    {
+      durationDays = 3,
+      barSize = '15 mins',
+      secType = 'STK',
+      exchange = 'SMART',
+      limit = 160,
+    } = {},
+  ) {
+    const params = new URLSearchParams({
+      durationDays: String(durationDays),
+      barSize,
+      secType,
+      exchange,
+      limit: String(limit),
+    });
+    return request(`/api/live/agents/${agentId}/candles?${params.toString()}`);
+  },
 };
 
 export default liveAPI;

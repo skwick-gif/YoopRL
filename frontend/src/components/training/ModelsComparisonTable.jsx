@@ -27,7 +27,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { loadModels } from '../../services/trainingAPI';
+import { loadModels, deleteModel as deleteModelApi } from '../../services/trainingAPI';
 
 const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
   const [models, setModels] = useState([]);
@@ -37,6 +37,33 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
   const [sortDirection, setSortDirection] = useState('desc');
   const [selectedModel, setSelectedModel] = useState(null);
   const [symbolFilter, setSymbolFilter] = useState(filterSymbol || '');
+  const [deletingId, setDeletingId] = useState(null);
+  const [statusMessage, setStatusMessage] = useState('');
+
+  const getModelIdentifier = (model) => {
+    if (!model) {
+      return null;
+    }
+
+    if (model.model_id) {
+      return model.model_id;
+    }
+
+    if (model.modelId) {
+      return model.modelId;
+    }
+
+    const rawAgent = (model.agent_type || '').toLowerCase();
+    const agentPrefix = rawAgent.includes('_') ? rawAgent.split('_')[0] : rawAgent;
+    const symbol = (model.symbol || '').toUpperCase();
+    const version = (model.version || '').replace(/\s+/g, '');
+
+    if (agentPrefix && symbol && version) {
+      return `${agentPrefix}_${symbol}_${version}`;
+    }
+
+    return null;
+  };
 
   const fetchModels = useCallback(async () => {
     setLoading(true);
@@ -73,6 +100,40 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
       setSortBy(field);
       setSortDirection('desc'); // Default to descending for new field
     }
+  };
+
+  const handleDelete = async (model) => {
+    if (!model) {
+      return;
+    }
+
+    const modelId = getModelIdentifier(model);
+    if (!modelId) {
+      setStatusMessage('❌ Unable to delete model: missing identifier');
+      setTimeout(() => setStatusMessage(''), 6000);
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete model ${modelId}? This will remove the artifact and metadata from disk.`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingId(modelId);
+    const result = await deleteModelApi(modelId);
+    if (result.success) {
+      setStatusMessage(`✅ Model ${modelId} deleted`);
+      if (selectedModel && (selectedModel.model_id === modelId || selectedModel.version === modelId)) {
+        setSelectedModel(null);
+      }
+      await fetchModels();
+    } else {
+      setStatusMessage(`❌ Failed to delete ${modelId}: ${result.error}`);
+      console.error('Model deletion failed:', result.error);
+    }
+
+    setTimeout(() => setStatusMessage(''), 6000);
+    setDeletingId(null);
   };
 
   // Get sorted and filtered models
@@ -185,7 +246,7 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
       }
     });
     
-    return best.model_id || best.version;
+    return getModelIdentifier(best) || best.version;
   };
 
   const sortedModels = getSortedModels();
@@ -269,6 +330,10 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
         </div>
       </div>
 
+      {statusMessage && (
+        <div style={styles.statusMessage}>{statusMessage}</div>
+      )}
+
       {/* Table */}
       <div style={styles.tableWrapper}>
         <table style={styles.table}>
@@ -301,11 +366,15 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
               <th style={styles.th}>
                 Features Used
               </th>
+              <th style={styles.th}>
+                Actions
+              </th>
             </tr>
           </thead>
           <tbody>
             {sortedModels.map((model, index) => {
-              const isBest = (model.model_id || model.version) === bestModelId;
+              const rowId = getModelIdentifier(model) || model.version;
+              const isBest = rowId === bestModelId;
               const rowStyle = {
                 ...styles.tr,
                 backgroundColor: isBest ? 'rgba(76, 175, 80, 0.1)' : (index % 2 === 0 ? '#1e1e1e' : '#252525'),
@@ -314,9 +383,16 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
 
               return (
                 <tr 
-                  key={model.model_id || model.version} 
+                  key={rowId || index} 
                   style={rowStyle}
-                  onClick={() => setSelectedModel(selectedModel?.model_id === model.model_id ? null : model)}
+                  onClick={() => {
+                    const currentSelectedId = getModelIdentifier(selectedModel);
+                    if (currentSelectedId && rowId && currentSelectedId === rowId) {
+                      setSelectedModel(null);
+                    } else {
+                      setSelectedModel(model);
+                    }
+                  }}
                 >
                   <td style={styles.td}>
                     {isBest && <span style={styles.bestBadge}>⭐ BEST</span>}
@@ -345,6 +421,24 @@ const ModelsComparisonTable = ({ agentType, symbol: filterSymbol }) => {
                   </td>
                   <td style={styles.td}>
                     <span style={styles.featuresText}>{getFeaturesSummary(model)}</span>
+                  </td>
+                  <td style={styles.td}>
+                    <button
+                      type="button"
+                      style={{
+                        ...styles.deleteButton,
+                        opacity: deletingId === rowId ? 0.6 : 0.9,
+                        cursor: deletingId === rowId ? 'not-allowed' : 'pointer'
+                      }}
+                      disabled={deletingId === rowId}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleDelete(model);
+                      }}
+                      title="Delete model from disk"
+                    >
+                      {deletingId === rowId ? 'Deleting...' : '🗑 Delete'}
+                    </button>
                   </td>
                 </tr>
               );
@@ -526,6 +620,15 @@ const styles = {
     fontSize: '14px',
     outline: 'none'
   },
+  statusMessage: {
+    marginBottom: '10px',
+    padding: '10px 12px',
+    borderRadius: '6px',
+    backgroundColor: '#2d2d2d',
+    color: '#e0e0e0',
+    border: '1px solid #444',
+    fontSize: '13px'
+  },
   button: {
     padding: '8px 16px',
     backgroundColor: '#4a9eff',
@@ -536,6 +639,18 @@ const styles = {
     fontSize: '14px',
     fontWeight: '600',
     transition: 'background 0.2s'
+  },
+  deleteButton: {
+    padding: '6px 12px',
+    backgroundColor: '#bb2f2f',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: '600',
+    transition: 'opacity 0.2s',
+    opacity: 0.9
   },
   tableWrapper: {
     overflowX: 'auto',

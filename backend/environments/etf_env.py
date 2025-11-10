@@ -40,7 +40,9 @@ Wiring:
 import numpy as np
 import pandas as pd
 from typing import Dict, Optional, Tuple
+
 from environments.base_env import BaseTradingEnv
+from training.commission import resolve_commission_config
 
 
 class ETFTradingEnv(BaseTradingEnv):
@@ -290,7 +292,7 @@ def create_etf_env(
     return ETFTradingEnv(
         df=df,
         initial_capital=config.get('initial_capital', 100000.0),
-        commission=config.get('commission', 1.0),
+            commission=resolve_commission_config(config),
         max_position_size=config.get('max_position_size', 1.0),
         vol_penalty=config.get('vol_penalty', -0.3),
         leverage_factor=leverage_factor,

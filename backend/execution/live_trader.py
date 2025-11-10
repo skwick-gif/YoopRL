@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 try:  # Guard import so unit tests can run without full SB3
     from stable_baselines3 import PPO, SAC
@@ -90,6 +91,7 @@ class LiveTraderConfig:
     interval: str = "1d"
     benchmark_symbol: Optional[str] = None
     metadata_path: Optional[Path] = None
+    auto_restart: bool = True
     extras: Dict[str, object] = field(default_factory=dict)
 
     @classmethod
@@ -178,6 +180,16 @@ class LiveTraderConfig:
         if metadata_path and "metadata_path" not in extras_payload:
             extras_payload["metadata_path"] = str(metadata_path)
 
+        auto_restart = _coalesce_bool(
+            overrides.get("auto_restart"),
+            extras_payload.get("auto_restart"),
+            training_settings.get("auto_restart"),
+            metadata.get("auto_restart"),
+            True,
+        )
+        base_kwargs["auto_restart"] = auto_restart
+        extras_payload["auto_restart"] = auto_restart
+
         allow_premarket = _coalesce_bool(
             overrides.get("allow_premarket"),
             extras_payload.get("allow_premarket"),
@@ -223,6 +235,7 @@ class LiveTraderConfig:
 
         base_kwargs["allow_premarket"] = _to_bool(base_kwargs.get("allow_premarket"))
         base_kwargs["allow_afterhours"] = _to_bool(base_kwargs.get("allow_afterhours"))
+        base_kwargs["auto_restart"] = _to_bool(base_kwargs.get("auto_restart", True))
 
         if "extras" in overrides and overrides["extras"] is not None:
             merged_extras = dict(extras_payload)
@@ -233,6 +246,7 @@ class LiveTraderConfig:
         if isinstance(extras_obj, dict):
             extras_obj["allow_premarket"] = base_kwargs["allow_premarket"]
             extras_obj["allow_afterhours"] = base_kwargs["allow_afterhours"]
+            extras_obj["auto_restart"] = base_kwargs["auto_restart"]
             base_kwargs["extras"] = extras_obj
 
         return cls(**base_kwargs)
@@ -263,6 +277,7 @@ class LiveTraderConfig:
             "interval": self.interval,
             "benchmark_symbol": self.benchmark_symbol,
             "metadata_path": str(self.metadata_path) if self.metadata_path else None,
+            "auto_restart": bool(self.auto_restart),
             "extras": self.extras,
         }
 
@@ -280,14 +295,18 @@ class LiveTrader:
         self.normalizer: Optional[StateNormalizer] = None
         self.feature_engineer: Optional[FeatureEngineering] = None
         self.broker = None  # Lazy import of IBKR adapter when needed
+        self.expected_obs_dim: Optional[int] = None
+        self._observation_columns: Optional[List[str]] = None
 
         # Trading state
         self.is_running: bool = False
         self.paper_trading: bool = bool(config.paper_trading)
+        self.auto_restart: bool = bool(getattr(config, "auto_restart", True))
         self.allow_premarket: bool = bool(getattr(config, "allow_premarket", False))
         self.allow_afterhours: bool = bool(getattr(config, "allow_afterhours", False))
         self.config.allow_premarket = self.allow_premarket
         self.config.allow_afterhours = self.allow_afterhours
+        self.config.auto_restart = self.auto_restart
         self.current_position: int = 0
         self.entry_price: float = 0.0
         self.current_price: float = 0.0
@@ -353,11 +372,10 @@ class LiveTrader:
         try:
             features, price = self._prepare_latest_observation()
             if features is None:
-                self._persist_risk_event(
-                    event_type="DATA_FETCH_FAILED",
-                    severity="WARNING",
-                    description=f"Missing market data for {self.config.symbol}",
-                )
+                self._log_invalid_observation(reason="Missing feature window")
+                return False
+
+            if not self._validate_observation(features):
                 return False
 
             action = self._predict_action(features)
@@ -432,6 +450,7 @@ class LiveTrader:
             "paper_trading": self.paper_trading,
             "allow_premarket": bool(self.allow_premarket),
             "allow_afterhours": bool(self.allow_afterhours),
+            "auto_restart": bool(self.auto_restart),
             "current_position": self.current_position,
             "entry_price": self.entry_price,
             "current_price": self.current_price,
@@ -465,6 +484,10 @@ class LiveTrader:
             self.model = SAC.load(str(path))
         else:
             raise ValueError(f"Unsupported agent_type '{agent_type}' for live trading")
+
+        shape = getattr(self.model.observation_space, "shape", None)
+        if shape and len(shape) > 0:
+            self.expected_obs_dim = int(shape[0])
 
     def _load_normalizer(self) -> None:
         if not self.config.normalizer_path:
@@ -521,16 +544,94 @@ class LiveTrader:
             self.logger.error("Unable to construct live feature frame for %s", self.config.symbol)
             return None, 0.0
 
-        latest_row = frame.iloc[-1]
+        latest_row = frame.iloc[-1].copy()
         price = self._resolve_last_price(latest_row)
 
-        features_series = latest_row.reindex(self.config.features_used, fill_value=0.0)
-        feature_values = features_series.astype(np.float32, copy=False).to_numpy()
+        position_value = self.current_position * price
+        total_value = self.current_capital + position_value
 
-        if self.normalizer is not None:
-            feature_values = self.normalizer.transform(feature_values.reshape(1, -1)).astype(np.float32).flatten()
+        if "position_context" in latest_row.index:
+            latest_row["position_context"] = position_value / total_value if total_value > 0 else 0.0
 
-        return feature_values, price
+        feature_order = list(self.config.features_used)
+        observation_columns = self._resolve_observation_columns(frame)
+        extra_columns = [col for col in observation_columns if col not in feature_order]
+
+        feature_series = latest_row.reindex(feature_order, fill_value=0.0)
+        feature_values = feature_series.astype(np.float32, copy=False).to_numpy()
+
+        if self.normalizer is not None and feature_values.size:
+            try:
+                feature_values = (
+                    self.normalizer.transform(feature_values.reshape(1, -1))
+                    .astype(np.float32)
+                    .flatten()
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                self.logger.debug("Normalizer transform failed: %s", exc)
+                feature_values = feature_series.astype(np.float32, copy=False).to_numpy()
+
+        extra_values = np.array([], dtype=np.float32)
+        if extra_columns:
+            extras = latest_row.reindex(extra_columns, fill_value=0.0).astype(np.float32, copy=False)
+            extra_values = extras.to_numpy()
+
+        portfolio_state = np.array(
+            [
+                self.current_capital / (self.config.initial_capital or 1.0),
+                position_value / (self.config.initial_capital or 1.0),
+                self.current_position / 1000.0,
+                total_value / (self.config.initial_capital or 1.0),
+            ],
+            dtype=np.float32,
+        )
+
+        observation = np.concatenate((portfolio_state, feature_values, extra_values)).astype(np.float32)
+
+        return observation, price
+
+    def _validate_observation(self, features: Optional[np.ndarray]) -> bool:
+        """Ensure observation shape matches the policy expectation."""
+
+        if features is None:
+            self._log_invalid_observation(reason="Features is None")
+            return False
+
+        if isinstance(features, (list, tuple)):
+            features = np.asarray(features, dtype=float)
+
+        if not isinstance(features, np.ndarray):
+            self._log_invalid_observation(reason=f"Unexpected feature type {type(features)}")
+            return False
+
+        if features.ndim > 1:
+            try:
+                features = features.reshape(-1)
+            except Exception:  # pragma: no cover - reshape failure
+                self._log_invalid_observation(reason=f"Cannot reshape observation with shape {features.shape}")
+                return False
+
+        expected = self.expected_obs_dim
+        if expected is None:
+            self.expected_obs_dim = int(features.shape[0])
+            return True
+
+        if int(features.shape[0]) == int(expected):
+            return True
+
+        self._log_invalid_observation(
+            reason=f"Unexpected observation shape {features.shape}; expected ({expected},)"
+        )
+        return False
+
+    def _log_invalid_observation(self, reason: str) -> None:
+        self.logger.error("Invalid observation: %s", reason)
+        self.last_error = reason
+        self._persist_risk_event(
+            event_type="INVALID_OBSERVATION",
+            severity="CRITICAL",
+            description=reason,
+        )
 
     def _fetch_daily_window(self) -> Optional[pd.DataFrame]:
         period = self._resolve_period(self.config.lookback_days)
@@ -607,10 +708,36 @@ class LiveTrader:
         primary_prefix = self.config.symbol.lower()
         primary_close_col = f"{primary_prefix}_close"
         if primary_close_col in dataset.columns:
-            dataset["Close"] = dataset[primary_close_col]
-            dataset["price"] = dataset[primary_close_col]
+            base_close = dataset[primary_close_col]
+            dataset["close"] = base_close
+            dataset["price"] = base_close
 
         return dataset
+
+    def _resolve_observation_columns(self, frame: pd.DataFrame) -> List[str]:
+        if self._observation_columns:
+            cached = [col for col in self._observation_columns if col in frame.columns]
+            if cached and len(cached) == len(self._observation_columns):
+                return cached
+
+        base_order = list(self.config.features_used)
+        extras: List[str] = []
+
+        for column in frame.columns:
+            if column in base_order:
+                continue
+            if column.lower() == 'session_date':
+                continue
+            try:
+                if not is_numeric_dtype(frame[column]):
+                    continue
+            except Exception:  # pragma: no cover - dtype inference fallback
+                continue
+            extras.append(column)
+
+        ordered = base_order + [col for col in extras if col not in base_order]
+        self._observation_columns = ordered
+        return ordered
 
     def _predict_action(self, observation: np.ndarray) -> int:
         if not self.model:
@@ -721,20 +848,22 @@ class LiveTrader:
             return
 
         try:
+            action_name = ACTION_NAMES.get(action, str(action))
+            state_payload = self._build_state_payload(state_features)
             self.db.log_agent_action(
                 agent_name=self.config.agent_id,
                 symbol=self.config.symbol,
-                action=ACTION_NAMES.get(action, "UNKNOWN"),
-                quantity=float(quantity),
-                price=float(price),
+                action=action_name,
+                quantity=quantity,
+                price=price,
                 reward=None,
                 rationale=None,
                 confidence=None,
-                state=self._build_state_payload(state_features),
+                state=state_payload,
             )
-        except Exception:  # pragma: no cover - persistence failures should not break trading
+        except Exception:  # pragma: no cover - logging should not interrupt trading loop
             self.logger.debug(
-                "Failed to persist agent action for %s", self.config.agent_id, exc_info=True
+                "Failed to persist action event for %s", self.config.agent_id, exc_info=True
             )
 
     def _persist_risk_event(

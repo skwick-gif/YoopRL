@@ -37,9 +37,24 @@ import ModelSelector from './training/ModelSelector';
 import BacktestResults from './training/BacktestResults';
 import DriftAlert from './training/DriftAlert';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
-import { useTrainingState } from '../hooks/useTrainingState';
+import { useTrainingState, DEFAULT_COMMISSION_CONFIG } from '../hooks/useTrainingState';
 import { startTraining, checkDriftStatus, runBacktest, fetchTrainingDateRange } from '../services/trainingAPI';
 import liveAPI from '../services/liveAPI';
+
+const INTRADAY_AGENT = 'SAC_INTRADAY_DSR';
+
+const INTRADAY_AGENT_DEFAULTS = {
+  symbol: 'TNA',
+  benchmark: 'IWM',
+  learningRate: 0.0003,
+  entropy: 0.2,
+  batchSize: 256,
+  volPenalty: -0.3,
+  episodes: 45000,
+  retrain: 'Weekly',
+};
+
+const resolveAgentType = (agent) => (agent === INTRADAY_AGENT ? 'SAC' : agent);
 
 function TabTraining() {
   // Initialize training state from custom hook
@@ -56,20 +71,14 @@ function TabTraining() {
   
   // Agent selection
   const [selectedAgent, setSelectedAgent] = useState('PPO'); // 'PPO', 'SAC', 'SAC_INTRADAY_DSR'
-  const INTRADAY_AGENT = 'SAC_INTRADAY_DSR';
-  const resolveAgentType = (agent) => (agent === INTRADAY_AGENT ? 'SAC' : agent);
   const isIntradayAgent = selectedAgent === INTRADAY_AGENT;
+
+  const buildCommissionPayload = (perShareValue) => ({
+    per_share: perShareValue,
+    min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+    max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+  });
   const [intradayDefaultsApplied, setIntradayDefaultsApplied] = useState(false);
-  const INTRADAY_AGENT_DEFAULTS = {
-    symbol: 'TNA',
-    benchmark: 'IWM',
-    learningRate: 0.0003,
-    entropy: 0.2,
-    batchSize: 256,
-    volPenalty: -0.3,
-    episodes: 45000,
-    retrain: 'Weekly'
-  };
   
   // Backtest results
   const [backtestResults, setBacktestResults] = useState(null);
@@ -304,8 +313,10 @@ function TabTraining() {
       }
 
       if (!result?.success) {
-        if (result?.status === 'not_found' && isIntradayAgent) {
-          const message = `⚠️ No cached 15m data found for ${symbol}. Download training data to refresh SQL.`;
+        if (result?.status === 'not_found') {
+          const message = isIntradayAgent
+            ? `⚠️ No cached 15m data found for ${symbol}. Download training data to refresh SQL.`
+            : `⚠️ No cached daily data found for ${symbol}. Download training data to populate the range.`;
           setDownloadMessage(message);
           setTimeout(() => {
             setDownloadMessage((current) => (current === message ? '' : current));
@@ -322,6 +333,14 @@ function TabTraining() {
       if (result.end_date) {
         trainingState.setEndDate(result.end_date);
       }
+
+      if (result.source === 'yfinance_fallback') {
+        const message = `📅 Date range auto-filled using available market data for ${symbol} (YFinance).`;
+        setDownloadMessage(message);
+        setTimeout(() => {
+          setDownloadMessage((current) => (current === message ? '' : current));
+        }, 9000);
+      }
     };
 
     loadDateBounds();
@@ -329,7 +348,7 @@ function TabTraining() {
     return () => {
       cancelled = true;
     };
-  }, [selectedAgent, trainingState.ppoSymbol, trainingState.sacSymbol, isIntradayAgent]);
+  }, [selectedAgent, trainingState.ppoSymbol, trainingState.sacSymbol, isIntradayAgent, trainingState]);
 
   // Check for data drift on mount and periodically
   useEffect(() => {
@@ -497,7 +516,11 @@ function TabTraining() {
     const agentInitialCapital =
       model.agent_type === 'PPO' ? trainingState.ppoInitialCapital : trainingState.sacInitialCapital;
     const initialCapital = Number(model.initial_capital) || Number(agentInitialCapital) || 100000;
-    const commissionValue = Number(trainingState.commission) || 0;
+    const perShareCommission = Number(trainingState.commission);
+    const resolvedCommissionPerShare = Number.isFinite(perShareCommission) && perShareCommission >= 0
+      ? perShareCommission
+      : DEFAULT_COMMISSION_CONFIG.per_share;
+    const commissionPayload = buildCommissionPayload(resolvedCommissionPerShare);
 
     const resolvedModelPath = model.model_path || model.file_path;
     if (!resolvedModelPath) {
@@ -517,7 +540,11 @@ function TabTraining() {
       start_date: trainingState.startDate,
       end_date: trainingState.endDate,
       initial_capital: initialCapital,
-      commission: commissionValue
+      commission: commissionPayload,
+      commission_per_share: resolvedCommissionPerShare,
+      commission_min_fee: DEFAULT_COMMISSION_CONFIG.min_fee,
+      commission_max_pct: DEFAULT_COMMISSION_CONFIG.max_pct,
+      commission_model: 'ibkr_tiered_us_equities'
     };
 
     try {
@@ -832,9 +859,29 @@ function TabTraining() {
       trainingState.setEndDate(trainingSettings.end_date);
     }
 
-    if (trainingSettings.commission !== undefined) {
-      const commissionValue = toFiniteNumber(trainingSettings.commission);
-      if (commissionValue !== undefined) trainingState.setCommission(commissionValue);
+    if (trainingSettings.commission !== undefined || trainingSettings.commission_per_share !== undefined) {
+      let resolvedCommission;
+
+      const rawCommission = trainingSettings.commission;
+      if (rawCommission && typeof rawCommission === 'object') {
+        const rawPerShare =
+          rawCommission.per_share ??
+          rawCommission.perShare ??
+          rawCommission.value ??
+          rawCommission.per_trade ??
+          rawCommission.perTrade;
+        resolvedCommission = toFiniteNumber(rawPerShare);
+      } else {
+        resolvedCommission = toFiniteNumber(rawCommission);
+      }
+
+      if (resolvedCommission === undefined) {
+        resolvedCommission = toFiniteNumber(trainingSettings.commission_per_share);
+      }
+
+      if (resolvedCommission !== undefined) {
+        trainingState.setCommission(resolvedCommission);
+      }
     }
 
     if (trainingSettings.optuna_trials !== undefined) {

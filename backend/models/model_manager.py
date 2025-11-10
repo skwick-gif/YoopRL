@@ -41,10 +41,14 @@ Wiring:
 import os
 import json
 import pickle
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import shutil
+
+
+logger = logging.getLogger(__name__)
 
 
 class ModelManager:
@@ -258,37 +262,66 @@ class ModelManager:
         return models
     
     def delete_model(self, model_id: str) -> bool:
-        """
-        Delete model and its metadata.
-        
-        Args:
-            model_id: Model identifier
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        agent_type = model_id.split('_')[0]
-        model_path = self.base_dir / agent_type / f"{model_id}.zip"
-        metadata_path = self.base_dir / agent_type / f"{model_id}_metadata.json"
-        
-        success = True
-        
-        if model_path.exists():
-            model_path.unlink()
-        else:
-            success = False
-        
+        """Delete a trained model, its metadata, and optional artifacts."""
+
+        if not model_id:
+            return False
+
+        agent_type = (model_id.split('_')[0] or '').lower()
+        model_dir = self.base_dir / agent_type
+
+        candidates = [
+            model_dir / f"{model_id}.zip",
+            model_dir / f"{model_id}.pkl",
+            model_dir / f"{model_id}.bin",
+        ]
+
+        metadata_path = model_dir / f"{model_id}_metadata.json"
+        deleted_any = False
+
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    candidate.unlink()
+                    deleted_any = True
+            except Exception as exc:
+                logger.warning("Failed to remove model artifact %s: %s", candidate, exc)
+
+        normalizer_candidate: Optional[Path] = None
         if metadata_path.exists():
-            metadata_path.unlink()
-        else:
-            success = False
-        
-        if success:
+            try:
+                with metadata_path.open('r', encoding='utf-8') as handle:
+                    metadata = json.load(handle)
+                normalizer_raw = metadata.get('normalizer_path') or metadata.get('normalizer')
+                if normalizer_raw:
+                    normalizer_candidate = Path(str(normalizer_raw))
+                    if not normalizer_candidate.is_absolute():
+                        root_dir = self.base_dir.parent.parent if self.base_dir.parent else Path('.')
+                        normalizer_candidate = (root_dir / normalizer_candidate).resolve()
+                    try:
+                        normalizer_candidate.relative_to(self.base_dir.parent)
+                    except ValueError:
+                        normalizer_candidate = None
+            except Exception as exc:  # pragma: no cover - metadata best effort
+                logger.warning("Failed to parse metadata for %s before deletion: %s", model_id, exc)
+            try:
+                metadata_path.unlink()
+                deleted_any = True
+            except Exception as exc:
+                logger.warning("Failed to remove metadata file %s: %s", metadata_path, exc)
+
+        if normalizer_candidate and normalizer_candidate.exists():
+            try:
+                normalizer_candidate.unlink()
+            except Exception as exc:  # pragma: no cover - cleanup safeguard
+                logger.warning("Failed to remove normalizer artifact %s: %s", normalizer_candidate, exc)
+
+        if deleted_any:
             print(f"✅ Model deleted: {model_id}")
         else:
-            print(f"⚠️ Model not found: {model_id}")
-        
-        return success
+            print(f"⚠️ Model artifacts not found: {model_id}")
+
+        return deleted_any
     
     def archive_model(self, model_id: str) -> bool:
         """

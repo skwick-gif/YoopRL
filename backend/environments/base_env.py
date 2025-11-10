@@ -430,8 +430,8 @@ class BaseTradingEnv(gym.Env, ABC):
             return 0.0
 
         if self._commission_config:
-            rate = float(self._commission_config.get('per_share', 0.005))
-            min_fee = float(self._commission_config.get('min_fee', 1.0))
+            rate = float(self._commission_config.get('per_share', 0.01))
+            min_fee = float(self._commission_config.get('min_fee', 2.5))
             max_pct = float(self._commission_config.get('max_pct', 0.01))
 
             fee = shares * rate

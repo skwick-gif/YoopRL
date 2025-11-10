@@ -225,6 +225,48 @@ export const loadModels = async () => {
 };
 
 /**
+ * Delete Trained Model
+ *
+ * @param {string} modelId - Identifier of the model to delete
+ * @returns {Promise<Object>} Deletion status payload
+ */
+export const deleteModel = async (modelId) => {
+  if (!modelId) {
+    return {
+      success: false,
+      error: 'model_id is required'
+    };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/training/models/${encodeURIComponent(modelId)}`, {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const message = data?.error || `Failed to delete model (HTTP ${response.status})`;
+      throw new Error(message);
+    }
+
+    return {
+      success: true,
+      data
+    };
+  } catch (error) {
+    console.error('Error deleting model:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
+/**
  * Load Specific Model
  * 
  * @param {string} modelPath - Path to model file
@@ -445,7 +487,11 @@ export const fetchTrainingDateRange = async ({ symbol, frequency = 'daily', inte
  *   start_date: '2024-01-01',
  *   end_date: '2024-11-01',
  *   initial_capital: 100000,
- *   commission: 1.0
+ *   commission: {
+ *     per_share: 0.01,
+ *     min_fee: 2.5,
+ *     max_pct: 0.01
+ *   }
  * }
  * 
  * Response format:

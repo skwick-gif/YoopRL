@@ -296,7 +296,14 @@ if __name__ == '__main__':
         'training_settings': {
             'start_date': '2023-01-01',
             'end_date': '2024-11-01',
-            'commission': 1.0,
+            'commission': {
+                'per_share': 0.01,
+                'min_fee': 2.5,
+                'max_pct': 0.01,
+            },
+            'commission_per_share': 0.01,
+            'commission_min_fee': 2.5,
+            'commission_max_pct': 0.01,
             'initial_cash': 100000
         }
     }

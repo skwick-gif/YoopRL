@@ -38,6 +38,7 @@ import json
 from copy import deepcopy
 
 from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
+from training.commission import IBKR_DEFAULT_COMMISSION
 
 
 @dataclass
@@ -127,6 +128,11 @@ def _deep_merge_dict(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[st
             result[key] = value
 
     return result
+
+
+def _default_commission() -> Dict[str, float]:
+    """Provide a copy of the default commission structure for new configs."""
+    return deepcopy(IBKR_DEFAULT_COMMISSION)
 
 
 @dataclass
@@ -290,9 +296,9 @@ class TrainingSettings:
     """
     start_date: str = '2023-01-01'
     end_date: str = '2024-11-01'
-    commission: Union[float, Dict[str, Any]] = 0.005
+    commission: Union[float, Dict[str, Any]] = field(default_factory=_default_commission)
     commission_model: str = 'ibkr_tiered_us_equities'
-    commission_min_fee: float = 1.0
+    commission_min_fee: float = 2.5
     commission_max_pct: float = 0.01
     initial_capital: float = 100000.0
     max_position_size: float = 1.0
@@ -740,9 +746,9 @@ def get_sac_intraday_dsr_preset(symbol: str, benchmark_symbol: Optional[str] = N
     training_settings = TrainingSettings(
         start_date='2018-01-01',
         end_date=now_str,
-        commission={'per_share': 0.005, 'min_fee': 1.0, 'max_pct': 0.01},
+        commission={'per_share': 0.01, 'min_fee': 2.5, 'max_pct': 0.01},
         commission_model='ibkr_tiered_us_equities',
-        commission_min_fee=1.0,
+        commission_min_fee=2.5,
         commission_max_pct=0.01,
         max_position_size=1.0,
         optuna_trials=50,

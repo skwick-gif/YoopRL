@@ -209,6 +209,21 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_logs_component 
                 ON system_logs(component)
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS live_agents (
+                    agent_id TEXT PRIMARY KEY,
+                    agent_type TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'stopped',
+                    auto_restart INTEGER NOT NULL DEFAULT 1,
+                    last_started_at TEXT,
+                    last_stopped_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
             
             # Market Data Table
             # Historical OHLCV data for training
@@ -656,6 +671,172 @@ class DatabaseManager:
         except Exception as exc:  # pragma: no cover - logging shouldn't break main flow
             logger.error("Failed to log system event: %s", exc)
             conn.rollback()
+        finally:
+            conn.close()
+
+    def persist_live_agent(
+        self,
+        *,
+        agent_id: str,
+        agent_type: str,
+        symbol: str,
+        config: Dict[str, Any],
+        status: str,
+        auto_restart: bool,
+    ) -> None:
+        """Store or update live agent configuration for bootstrapping."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        now = datetime.now().isoformat()
+        status_normalized = (status or "stopped").lower()
+        auto_restart_flag = 1 if auto_restart else 0
+        config_json = json.dumps(config)
+
+        last_started = now if status_normalized == "running" else None
+        last_stopped = now if status_normalized == "stopped" else None
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO live_agents (
+                    agent_id,
+                    agent_type,
+                    symbol,
+                    config_json,
+                    status,
+                    auto_restart,
+                    last_started_at,
+                    last_stopped_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET
+                    agent_type = excluded.agent_type,
+                    symbol = excluded.symbol,
+                    config_json = excluded.config_json,
+                    status = excluded.status,
+                    auto_restart = excluded.auto_restart,
+                    updated_at = excluded.updated_at,
+                    last_started_at = CASE
+                        WHEN excluded.last_started_at IS NOT NULL THEN excluded.last_started_at
+                        ELSE live_agents.last_started_at
+                    END,
+                    last_stopped_at = CASE
+                        WHEN excluded.last_stopped_at IS NOT NULL THEN excluded.last_stopped_at
+                        ELSE live_agents.last_stopped_at
+                    END
+                """,
+                (
+                    agent_id,
+                    agent_type,
+                    symbol,
+                    config_json,
+                    status_normalized,
+                    auto_restart_flag,
+                    last_started,
+                    last_stopped,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise RuntimeError(f"Failed to persist live agent {agent_id}: {exc}") from exc
+        finally:
+            conn.close()
+
+    def update_live_agent_status(self, agent_id: str, status: str) -> None:
+        """Update status metadata for a persisted live agent."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        now = datetime.now().isoformat()
+        status_normalized = (status or "stopped").lower()
+        started_at = now if status_normalized == "running" else None
+        stopped_at = now if status_normalized == "stopped" else None
+
+        try:
+            cursor.execute(
+                """
+                UPDATE live_agents
+                SET status = ?,
+                    updated_at = ?,
+                    last_started_at = CASE
+                        WHEN ? IS NOT NULL THEN ?
+                        ELSE last_started_at
+                    END,
+                    last_stopped_at = CASE
+                        WHEN ? IS NOT NULL THEN ?
+                        ELSE last_stopped_at
+                    END
+                WHERE agent_id = ?
+                """,
+                (
+                    status_normalized,
+                    now,
+                    started_at,
+                    started_at,
+                    stopped_at,
+                    stopped_at,
+                    agent_id,
+                ),
+            )
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise RuntimeError(f"Failed to update live agent {agent_id}: {exc}") from exc
+        finally:
+            conn.close()
+
+    def remove_live_agent(self, agent_id: str) -> None:
+        """Delete persisted state for a live agent."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("DELETE FROM live_agents WHERE agent_id = ?", (agent_id,))
+            conn.commit()
+        except Exception as exc:
+            conn.rollback()
+            raise RuntimeError(f"Failed to remove live agent {agent_id}: {exc}") from exc
+        finally:
+            conn.close()
+
+    def load_live_agents(self, *, only_auto_restart: bool = True) -> List[Dict[str, Any]]:
+        """Return persisted live agents for bootstrapping."""
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        try:
+            query = "SELECT agent_id, agent_type, symbol, config_json, status, auto_restart FROM live_agents"
+            params: List[Any] = []
+            if only_auto_restart:
+                query += " WHERE auto_restart = 1"
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            results: List[Dict[str, Any]] = []
+            for row in rows:
+                config_json = row["config_json"]
+                try:
+                    config = json.loads(config_json) if config_json else {}
+                except json.JSONDecodeError:
+                    config = {}
+                results.append({
+                    "agent_id": row["agent_id"],
+                    "agent_type": row["agent_type"],
+                    "symbol": row["symbol"],
+                    "config": config,
+                    "status": row["status"],
+                    "auto_restart": bool(row["auto_restart"]),
+                })
+            return results
         finally:
             conn.close()
     
