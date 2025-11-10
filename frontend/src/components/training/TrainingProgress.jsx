@@ -31,7 +31,7 @@
  * - Calls stopTraining API when stop button clicked
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Button, Card } from '../common/UIComponents';
 import { getProgress, stopTraining } from '../../services/trainingAPI';
 
@@ -44,9 +44,20 @@ function TrainingProgress({
   downloadMessage, // NEW: Non-blocking message
   trainingId,
   handleDownloadData,
-  handleStartTraining 
+  handleStartTraining,
+  onTrainingStatusChange,
+  onTrainingStopped
 }) {
   const [progressData, setProgressData] = useState(null);
+  const lastStatusRef = useRef();
+  const lastProgressRef = useRef();
+
+  useEffect(() => {
+    if (isTraining) {
+      lastStatusRef.current = undefined;
+      lastProgressRef.current = undefined;
+    }
+  }, [isTraining, trainingId]);
 
   const resolveMessageStyle = (message) => {
     if (!message) {
@@ -114,6 +125,30 @@ function TrainingProgress({
     return () => clearInterval(interval);
   }, [isTraining, trainingId]);
 
+  useEffect(() => {
+    if (!progressData) {
+      return;
+    }
+
+    const { status, progress } = progressData;
+    const numericProgress = typeof progress === 'number' ? progress : undefined;
+
+    const hasStatusChanged = status && lastStatusRef.current !== status;
+    const hasProgressChanged = typeof numericProgress === 'number' && lastProgressRef.current !== numericProgress;
+
+    if ((hasStatusChanged || hasProgressChanged) && typeof onTrainingStatusChange === 'function') {
+      onTrainingStatusChange({ status, progress: numericProgress });
+    }
+
+    if (hasStatusChanged) {
+      lastStatusRef.current = status;
+    }
+    if (hasProgressChanged) {
+      lastProgressRef.current = numericProgress;
+    }
+
+  }, [progressData, onTrainingStatusChange]);
+
   // Handle stop training
   const handleStopTraining = async () => {
     if (!trainingId) return;
@@ -121,6 +156,12 @@ function TrainingProgress({
     const result = await stopTraining(trainingId);
     if (result.success) {
       alert('Training stopped successfully');
+      if (typeof onTrainingStatusChange === 'function') {
+        onTrainingStatusChange({ status: 'stopped', progress: progressData?.progress });
+      }
+      if (typeof onTrainingStopped === 'function') {
+        onTrainingStopped();
+      }
     } else {
       alert(`Failed to stop training: ${result.error}`);
     }

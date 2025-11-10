@@ -27,7 +27,7 @@
  * - API calls handled through trainingAPI service
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import HyperparameterGrid from './training/HyperparameterGrid';
@@ -39,6 +39,7 @@ import DriftAlert from './training/DriftAlert';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
 import { useTrainingState, DEFAULT_COMMISSION_CONFIG } from '../hooks/useTrainingState';
 import { startTraining, checkDriftStatus, runBacktest, fetchTrainingDateRange } from '../services/trainingAPI';
+import { API_BASE_URL } from '../services/trainingAPI';
 import liveAPI from '../services/liveAPI';
 
 const INTRADAY_AGENT = 'SAC_INTRADAY_DSR';
@@ -72,6 +73,7 @@ function TabTraining() {
   // Agent selection
   const [selectedAgent, setSelectedAgent] = useState('PPO'); // 'PPO', 'SAC', 'SAC_INTRADAY_DSR'
   const isIntradayAgent = selectedAgent === INTRADAY_AGENT;
+  const resolvedAgentType = resolveAgentType(selectedAgent);
 
   const buildCommissionPayload = (perShareValue) => ({
     per_share: perShareValue,
@@ -92,6 +94,18 @@ function TabTraining() {
   // Help documentation viewer
   const [showHelp, setShowHelp] = useState(false);
   const [helpContent, setHelpContent] = useState('');
+
+  const activeSymbol = resolvedAgentType === 'PPO'
+    ? (trainingState.ppoSymbol || '')
+    : (trainingState.sacSymbol || '');
+
+  const dataConfigSnapshotRef = useRef({
+    agent: selectedAgent,
+    symbol: activeSymbol.trim().toUpperCase(),
+    start: trainingState.startDate || '',
+    end: trainingState.endDate || '',
+    benchmark: isIntradayAgent ? (trainingState.sacBenchmarkSymbol || '').trim().toUpperCase() : ''
+  });
 
   // Deploy to Live Trading handlers
   const deployToLiveTrading = async (agentType) => {
@@ -269,6 +283,47 @@ function TabTraining() {
   }, [selectedAgent]);
 
   useEffect(() => {
+    const snapshot = {
+      agent: selectedAgent,
+      symbol: activeSymbol.trim().toUpperCase(),
+      start: trainingState.startDate || '',
+      end: trainingState.endDate || '',
+      benchmark: isIntradayAgent ? (trainingState.sacBenchmarkSymbol || '').trim().toUpperCase() : ''
+    };
+
+    const previous = dataConfigSnapshotRef.current;
+    const hasChanged =
+      previous.agent !== snapshot.agent ||
+      previous.symbol !== snapshot.symbol ||
+      previous.start !== snapshot.start ||
+      previous.end !== snapshot.end ||
+      previous.benchmark !== snapshot.benchmark;
+
+    if (hasChanged) {
+      dataConfigSnapshotRef.current = snapshot;
+
+      if (dataDownloaded) {
+        setDataDownloaded(false);
+        if (downloadProgress !== 0) {
+          setDownloadProgress(0);
+        }
+        setDownloadMessage('⚠️ Training data needs refresh after configuration changes.');
+      } else if (downloadProgress !== 0) {
+        setDownloadProgress(0);
+      }
+    }
+  }, [
+    selectedAgent,
+    activeSymbol,
+    trainingState.startDate,
+    trainingState.endDate,
+    trainingState.sacBenchmarkSymbol,
+    isIntradayAgent,
+    dataDownloaded,
+    downloadProgress
+  ]);
+
+  useEffect(() => {
     if (!isIntradayAgent) {
       setIntradayDefaultsApplied(false);
       return;
@@ -293,7 +348,7 @@ function TabTraining() {
   useEffect(() => {
     let cancelled = false;
 
-  const agentForSymbol = resolveAgentType(selectedAgent);
+  const agentForSymbol = resolvedAgentType;
   const rawSymbol = agentForSymbol === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
   const symbol = (rawSymbol || '').trim().toUpperCase();
 
@@ -398,7 +453,7 @@ function TabTraining() {
         throw new Error('Symbol is required before downloading data');
       }
 
-      const response = await fetch('http://localhost:8000/api/training/download', {
+  const response = await fetch(`${API_BASE_URL}/api/training/download`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -506,7 +561,7 @@ function TabTraining() {
         trainingState.setPpoSymbol(model.symbol);
       }
       if (model.agent_type === 'SAC' && trainingState.setSacSymbol) {
-        trainingState.setSacSymbol(model.symbol);
+  trainingState.setSacSymbol(model.symbol);
       }
     }
 
@@ -618,6 +673,30 @@ function TabTraining() {
     if (window.confirm('Start retraining with recent data?')) {
       handleStartTraining();
     }
+  };
+
+  const handleTrainingStatusChange = ({ status, progress }) => {
+    if (typeof progress === 'number' && !Number.isNaN(progress)) {
+      setTrainingProgress(progress);
+    }
+
+    if (!status) {
+      return;
+    }
+
+    const normalizedStatus = String(status).toLowerCase();
+    if (normalizedStatus === 'completed') {
+      setIsTraining(false);
+      setTrainingProgress((prev) => (prev < 100 ? 100 : prev));
+    } else if (normalizedStatus === 'failed') {
+      setIsTraining(false);
+    }
+  };
+
+  const handleTrainingStopped = () => {
+    setIsTraining(false);
+    setTrainingId(null);
+    setTrainingProgress(0);
   };
 
   const resolveFlag = (value) => {
@@ -1328,13 +1407,15 @@ function TabTraining() {
         trainingId={trainingId}
         handleDownloadData={handleDownloadData}
         handleStartTraining={handleStartTraining}
+        onTrainingStatusChange={handleTrainingStatusChange}
+        onTrainingStopped={handleTrainingStopped}
       />
 
       {/* Model Selector */}
       <ModelSelector 
         key={selectedAgent}
         onModelSelect={handleModelSelect}
-        agentType={selectedAgent}
+        agentType={resolveAgentType(selectedAgent)}
       />
 
       {/* Backtest Results */}

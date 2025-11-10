@@ -30,11 +30,22 @@
 import React, { useState, useEffect } from 'react';
 import { loadModels } from '../../services/trainingAPI';
 
+const normalizeAgentType = (value) => {
+  if (!value) {
+    return value;
+  }
+
+  const upper = value.toUpperCase();
+  return upper === 'SAC_INTRADAY_DSR' ? 'SAC' : upper;
+};
+
 const ModelSelector = ({ onModelSelect, agentType }) => {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+
+  const normalizedAgentType = normalizeAgentType(agentType);
 
   // Fetch available models on component mount
   useEffect(() => {
@@ -45,8 +56,8 @@ const ModelSelector = ({ onModelSelect, agentType }) => {
       const result = await loadModels();
       if (result.success) {
         // Filter by agent type if specified
-        const filteredModels = agentType
-          ? result.models.filter(model => model.agent_type === agentType)
+        const filteredModels = normalizedAgentType
+          ? result.models.filter(model => (model.agent_type || '').toUpperCase() === normalizedAgentType)
           : result.models;
 
         setModels(filteredModels);
@@ -58,7 +69,7 @@ const ModelSelector = ({ onModelSelect, agentType }) => {
     };
 
     fetchModels();
-  }, [agentType]);
+  }, [normalizedAgentType]);
 
   // Handle model selection
   const handleSelectChange = (event) => {
