@@ -37,7 +37,7 @@ import ModelSelector from './training/ModelSelector';
 import BacktestResults from './training/BacktestResults';
 import DriftAlert from './training/DriftAlert';
 import ModelsComparisonTable from './training/ModelsComparisonTable';
-import { useTrainingState, DEFAULT_COMMISSION_CONFIG } from '../hooks/useTrainingState';
+import { useTrainingState, DEFAULT_COMMISSION_CONFIG, DEFAULT_INTRADAY_EXECUTION } from '../hooks/useTrainingState';
 import { startTraining, checkDriftStatus, runBacktest, fetchTrainingDateRange } from '../services/trainingAPI';
 import { API_BASE_URL } from '../services/trainingAPI';
 import liveAPI from '../services/liveAPI';
@@ -53,6 +53,11 @@ const INTRADAY_AGENT_DEFAULTS = {
   volPenalty: -0.3,
   episodes: 45000,
   retrain: 'Weekly',
+  slippageBps: 1.5,
+  slippagePerShare: 0.0,
+  forcedExitMinutes: 375,
+  forcedExitTolerance: 2,
+  forcedExitColumn: 'minutes_from_open',
 };
 
 const resolveAgentType = (agent) => (agent === INTRADAY_AGENT ? 'SAC' : agent);
@@ -341,6 +346,11 @@ function TabTraining() {
     trainingState.setSacVolPenalty(INTRADAY_AGENT_DEFAULTS.volPenalty);
     trainingState.setSacEpisodes(INTRADAY_AGENT_DEFAULTS.episodes);
     trainingState.setSacRetrain(INTRADAY_AGENT_DEFAULTS.retrain);
+    trainingState.setIntradaySlippageBps(INTRADAY_AGENT_DEFAULTS.slippageBps);
+    trainingState.setIntradaySlippagePerShare(INTRADAY_AGENT_DEFAULTS.slippagePerShare);
+    trainingState.setForcedExitMinutes(INTRADAY_AGENT_DEFAULTS.forcedExitMinutes);
+    trainingState.setForcedExitTolerance(INTRADAY_AGENT_DEFAULTS.forcedExitTolerance);
+    trainingState.setForcedExitColumn(INTRADAY_AGENT_DEFAULTS.forcedExitColumn);
 
     setIntradayDefaultsApplied(true);
   }, [isIntradayAgent, intradayDefaultsApplied, trainingState]);
@@ -348,9 +358,9 @@ function TabTraining() {
   useEffect(() => {
     let cancelled = false;
 
-  const agentForSymbol = resolvedAgentType;
-  const rawSymbol = agentForSymbol === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
-  const symbol = (rawSymbol || '').trim().toUpperCase();
+    const agentForSymbol = resolvedAgentType;
+    const rawSymbol = agentForSymbol === 'PPO' ? trainingState.ppoSymbol : trainingState.sacSymbol;
+    const symbol = (rawSymbol || '').trim().toUpperCase();
 
     if (!symbol || symbol.length < 2) {
       return undefined;
@@ -403,7 +413,7 @@ function TabTraining() {
     return () => {
       cancelled = true;
     };
-  }, [selectedAgent, trainingState.ppoSymbol, trainingState.sacSymbol, isIntradayAgent, trainingState]);
+  }, [selectedAgent, trainingState.ppoSymbol, trainingState.sacSymbol, isIntradayAgent, trainingState, resolvedAgentType]);
 
   // Check for data drift on mount and periodically
   useEffect(() => {
@@ -967,6 +977,46 @@ function TabTraining() {
     if (trainingSettings.optuna_trials !== undefined) {
       const trials = toInteger(trainingSettings.optuna_trials);
       if (trials !== undefined) trainingState.setOptunaTrials(trials);
+    }
+
+    if (trainingSettings.slippage !== undefined || trainingSettings.slippage_bps !== undefined || trainingSettings.slippage_per_share !== undefined) {
+      const slippagePayload = trainingSettings.slippage || {};
+      const resolvedBps = toFiniteNumber(
+        slippagePayload.buy_bps ??
+        slippagePayload.sell_bps ??
+        trainingSettings.slippage_bps
+      );
+      if (resolvedBps !== undefined) {
+        trainingState.setIntradaySlippageBps(resolvedBps);
+      }
+
+      const resolvedPerShare = toFiniteNumber(
+        slippagePayload.buy_per_share ??
+        slippagePayload.sell_per_share ??
+        trainingSettings.slippage_per_share
+      );
+      if (resolvedPerShare !== undefined) {
+        trainingState.setIntradaySlippagePerShare(resolvedPerShare);
+      }
+    }
+
+    if (trainingSettings.forced_exit_minutes !== undefined) {
+      const exitMinutes = toFiniteNumber(trainingSettings.forced_exit_minutes);
+      if (exitMinutes !== undefined) {
+        trainingState.setForcedExitMinutes(exitMinutes);
+      }
+    }
+
+    if (trainingSettings.forced_exit_tolerance !== undefined) {
+      const exitTolerance = toFiniteNumber(trainingSettings.forced_exit_tolerance);
+      if (exitTolerance !== undefined) {
+        trainingState.setForcedExitTolerance(exitTolerance);
+      }
+    }
+
+    if (trainingSettings.forced_exit_column !== undefined) {
+      const columnValue = String(trainingSettings.forced_exit_column || '').trim();
+      trainingState.setForcedExitColumn(columnValue || DEFAULT_INTRADAY_EXECUTION.forced_exit_column);
     }
 
     if (trainingSettings.initial_capital !== undefined) {

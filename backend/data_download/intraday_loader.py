@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -9,9 +11,13 @@ from typing import Iterable, List, Optional, Tuple
 
 import pandas as pd
 import pytz
-import yfinance as yf
+import requests
 
 from database.db_manager import DatabaseManager
+from importlib import import_module
+
+from data_download.config import APIKeysConfig
+from backend.utils.market_calendar import trading_sessions_between
 
 INTRADAY_ROOT = Path("data/intraday")
 NY_TZ = pytz.timezone("America/New_York")
@@ -26,6 +32,12 @@ ALLOWED_INTRADAY_SYMBOLS = frozenset({
     "DIA",
     "UDOW",
 })
+
+_LOGGER = logging.getLogger(__name__)
+_TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
+_INTERVAL_ALIASES = {
+    "15m": "15min",
+}
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -85,27 +97,80 @@ def list_cached_sessions(config: IntradayStoreConfig) -> List[date]:
 
 
 def _download_intraday(symbol: str, session_start: datetime, session_end: datetime, interval: str) -> pd.DataFrame:
-    data = yf.download(
-        symbol,
-        start=session_start.astimezone(pytz.UTC),
-        end=(session_end + timedelta(minutes=1)).astimezone(pytz.UTC),
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        actions=False,
-    )
+    td_interval = _INTERVAL_ALIASES.get(interval, interval)
+    candidate_keys = _resolve_twelve_data_keys()
+    if not candidate_keys:
+        raise RuntimeError(
+            "Twelve Data API key is not configured. Set TWELVE_DATA_KEY/TWELVEDATA_API_KEY in the environment, "
+            "or update backend/data_download/twelvedata_downloader.py with a valid API_KEY."
+        )
 
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
+    params = {
+        "symbol": symbol,
+        "interval": td_interval,
+        "format": "JSON",
+        "timezone": "America/New_York",
+        "start_date": session_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_date": session_end.strftime("%Y-%m-%d %H:%M:%S"),
+        "outputsize": 5000,
+        "order": "asc",
+    }
 
-    if data.empty:
-        return data
+    last_message: Optional[str] = None
+    for idx, api_key in enumerate(candidate_keys):
+        params["apikey"] = api_key
+        try:
+            response = requests.get(_TWELVE_DATA_BASE_URL, params=params, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Failed to download intraday data for {symbol} from Twelve Data: {exc}") from exc
 
-    data.index = pd.DatetimeIndex(data.index).tz_localize("UTC").tz_convert(NY_TZ)
-    data = data.rename(columns=str.title)
-    data = data.loc[(data.index >= session_start) & (data.index <= session_end)]
+        if isinstance(payload, dict) and payload.get("status") == "error":
+            message = payload.get("message") or payload.get("note") or "unknown Twelve Data error"
+            last_message = message
+            if "apikey" in message.lower() and idx < len(candidate_keys) - 1:
+                continue
+            raise RuntimeError(f"Twelve Data error for {symbol}: {message}")
 
-    return data
+        values = payload.get("values") if isinstance(payload, dict) else None
+        if not values:
+            _LOGGER.warning("No intraday values returned for %s on %s", symbol, session_start.date())
+            return pd.DataFrame()
+
+        df = pd.DataFrame(values)
+        if df.empty:
+            return df
+
+        if "datetime" not in df.columns:
+            raise RuntimeError("Twelve Data response missing 'datetime' column")
+
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        df = df.dropna(subset=["datetime"])
+
+        for column in ("open", "high", "low", "close", "volume"):
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        df = df.rename(columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        })
+
+        df = df.set_index("datetime").sort_index()
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize(NY_TZ)
+        else:
+            df.index = df.index.tz_convert(NY_TZ)
+
+        df = df.loc[(df.index >= session_start) & (df.index <= session_end)]
+
+        return df
+
+    raise RuntimeError(f"Twelve Data error for {symbol}: {last_message or 'no valid API key candidates'}")
 
 
 def _save_session(config: IntradayStoreConfig, session_date: date, df: pd.DataFrame) -> Path:
@@ -123,21 +188,37 @@ def download_and_cache_sessions(
     config = IntradayStoreConfig(symbol=symbol, interval=interval)
     saved_paths: List[Path] = []
 
-    cursor = start
-    while cursor <= end:
-        path = _session_path(config, cursor)
+    for session_day in trading_sessions_between(start, end):
+        path = _session_path(config, session_day)
         if path.exists():
-            cursor += timedelta(days=1)
             continue
 
-        session_start = NY_TZ.localize(datetime.combine(cursor, datetime.min.time()) + timedelta(hours=9, minutes=30))
-        session_end = NY_TZ.localize(datetime.combine(cursor, datetime.min.time()) + timedelta(hours=15, minutes=45))
+        session_start = NY_TZ.localize(
+            datetime.combine(session_day, datetime.min.time()) + timedelta(hours=9, minutes=30)
+        )
+        session_end = NY_TZ.localize(
+            datetime.combine(session_day, datetime.min.time()) + timedelta(hours=15, minutes=45)
+        )
 
-        df = _download_intraday(symbol, session_start, session_end, interval)
+        try:
+            df = _download_intraday(symbol, session_start, session_end, interval)
+        except RuntimeError as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            if "market" in message and "closed" in message:
+                _LOGGER.info(
+                    "Skipping %s %s: market closed according to provider", symbol, session_day
+                )
+                continue
+            if "no data" in message and "available" in message:
+                _LOGGER.info(
+                    "Skipping %s %s: provider returned no data", symbol, session_day
+                )
+                continue
+            raise
+
         if not df.empty:
-            _save_session(config, cursor, df)
+            _save_session(config, session_day, df)
             saved_paths.append(path)
-        cursor += timedelta(days=1)
 
     return saved_paths
 
@@ -163,6 +244,44 @@ def _load_sessions(paths: Iterable[Path]) -> pd.DataFrame:
     return data
 
 
+def _resolve_twelve_data_keys() -> List[str]:
+    """Collect possible Twelve Data API keys with deduplication."""
+
+    candidates = [
+        os.getenv("TWELVE_DATA_KEY"),
+        os.getenv("TWELVEDATA_API_KEY"),
+        APIKeysConfig().twelve_data_key,
+    ]
+
+    try:
+        downloader_module = import_module("backend.data_download.twelvedata_downloader")
+        candidates.append(getattr(downloader_module, "API_KEY", ""))
+    except Exception:
+        pass
+
+    resolved: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        stripped = candidate.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        resolved.append(stripped)
+    return resolved
+
+
+def _get_twelve_data_key() -> str:
+    keys = _resolve_twelve_data_keys()
+    if not keys:
+        raise RuntimeError(
+            "Twelve Data API key is not configured. Set TWELVE_DATA_KEY/TWELVEDATA_API_KEY in the environment, "
+            "or update backend/data_download/twelvedata_downloader.py with a valid API_KEY."
+        )
+    return keys[0]
+
+
 def load_intraday_data(
     symbol: str,
     interval: str = "15m",
@@ -185,6 +304,9 @@ def load_intraday_data(
     if start_date > end_date:
         raise ValueError("start_date must be earlier than end_date")
 
+    expected_sessions = trading_sessions_between(start_date, end_date)
+    expected_session_set = set(expected_sessions)
+
     data_from_sql = False
     if not force_download:
         start_ts = pd.Timestamp(start_date).tz_localize(NY_TZ).isoformat()
@@ -194,13 +316,13 @@ def load_intraday_data(
             data = sql_df.copy()
             data_from_sql = True
 
-    if not data_from_sql and (force_download or not cached_sessions.issuperset({d for d in _daterange(start_date, end_date)})):
+    if not data_from_sql and (force_download or not cached_sessions.issuperset(expected_session_set)):
         download_and_cache_sessions(symbol, start_date, end_date, interval=interval)
 
     if not data_from_sql:
         target_paths = [
             _session_path(config, session_day)
-            for session_day in _daterange(start_date, end_date)
+            for session_day in expected_sessions
             if _session_path(config, session_day).exists()
         ]
 
@@ -230,10 +352,9 @@ def _augment_intraday_metadata(df: pd.DataFrame) -> None:
 
 
 def _daterange(start: date, end: date) -> Iterable[date]:
-    cursor = start
-    while cursor <= end:
-        yield cursor
-        cursor += timedelta(days=1)
+    """Backward-compatible alias returning only trading sessions."""
+
+    yield from trading_sessions_between(start, end)
 
 
 def build_intraday_dataset(

@@ -257,6 +257,7 @@ def evaluate_trained_model(
     initial_capital: float = 100000,
     *,
     deterministic: bool = True,
+    seed: Optional[int] = None,
 ) -> Dict:
     """
     Evaluate a trained model on test environment.
@@ -269,6 +270,7 @@ def evaluate_trained_model(
         n_eval_episodes: Number of episodes to run
         initial_capital: Starting capital
         deterministic: When False, sample stochastic policy actions (useful for SAC intraday runs)
+        seed: Optional base seed applied to environment resets for reproducibility
     
     Returns:
         Dictionary with metrics, equity_curve, trade_history
@@ -276,12 +278,25 @@ def evaluate_trained_model(
     print(f"\n📊 Evaluating model on test set...")
     print(f"   Episodes: {n_eval_episodes}")
     print(f"   Initial Capital: ${initial_capital:,.0f}")
+    if seed is not None:
+        print(f"   Evaluation seed: {seed}")
     
     all_equity_curves = []
     all_trades = []
     
     for episode in range(n_eval_episodes):
-        obs, _ = test_env.reset()
+        episode_seed = (seed + episode) if seed is not None else None
+        reset_result = (
+            test_env.reset(seed=episode_seed)
+            if episode_seed is not None
+            else test_env.reset()
+        )
+
+        if isinstance(reset_result, tuple):
+            obs, _ = reset_result
+        else:  # pragma: no cover - legacy Gym API
+            obs = reset_result
+            _ = {}
         terminated = False
         truncated = False
         episode_equity = [initial_capital]

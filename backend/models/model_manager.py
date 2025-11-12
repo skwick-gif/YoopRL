@@ -203,6 +203,8 @@ class ModelManager:
         try:
             from stable_baselines3 import PPO, SAC
             agent_type = metadata['agent_type'].upper()
+            if agent_type == 'SAC_INTRADAY_DSR':
+                agent_type = 'SAC'
             
             if agent_type == 'PPO':
                 model = PPO.load(str(Path(model_path).with_suffix('')))

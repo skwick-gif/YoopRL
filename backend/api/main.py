@@ -33,6 +33,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from database.db_manager import DatabaseManager
 from training.train import train_agent, load_data
+from training.fine_tune import fine_tune_model
 from models.model_manager import ModelManager
 from evaluation.backtester import run_backtest
 from utils.state_normalizer import StateNormalizer
@@ -76,6 +77,9 @@ register_live_routes(app, db, live_agent_manager, model_manager, logger)
 training_sessions = {}
 training_threads = {}
 
+fine_tune_jobs = {}
+fine_tune_threads = {}
+
 
 def _format_duration(seconds: Optional[Union[float, int]]) -> Optional[str]:
     """Format a duration (seconds) into HH:MM:SS, or None for invalid input."""
@@ -101,6 +105,24 @@ def _parse_int(value) -> Optional[int]:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _parse_bool(value, default: Optional[bool] = None) -> Optional[bool]:
+    """Best-effort parsing of booleans from heterogeneous payloads."""
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'1', 'true', 'yes', 'y', 'on'}:
+            return True
+        if lowered in {'0', 'false', 'no', 'n', 'off'}:
+            return False
+    return default
 
 
 # Health check endpoint
@@ -730,6 +752,117 @@ def stop_training():
             'status': 'error',
             'error': str(e)
         }), 500
+
+
+@app.route('/api/training/fine_tune', methods=['POST'])
+def trigger_fine_tune():
+    """Trigger asynchronous fine-tune for an existing SAC intraday model."""
+
+    try:
+        data = request.json or {}
+
+        model_id = data.get('model_id')
+        model_path = data.get('model_path')
+        if not model_id and not model_path:
+            return jsonify({
+                'status': 'error',
+                'error': 'model_id or model_path is required'
+            }), 400
+
+        days = _parse_int(data.get('days')) or 30
+        timesteps = _parse_int(data.get('timesteps')) or 5000
+        eval_episodes = _parse_int(data.get('eval_episodes')) or 5
+
+        start_date = data.get('start_date')
+        end_date = data.get('end_date')
+        version_suffix = data.get('version_suffix')
+
+        dry_run = bool(_parse_bool(data.get('dry_run'), False))
+        clear_buffer = _parse_bool(data.get('clear_buffer'), True)
+        no_clear = _parse_bool(data.get('no_clear_buffer'), None)
+        if no_clear is True:
+            clear_buffer = False
+
+        save_artifacts = _parse_bool(data.get('save_artifacts'), True)
+        no_save = _parse_bool(data.get('no_save'), None)
+        if no_save is True:
+            save_artifacts = False
+
+        job_id = str(uuid.uuid4())
+        submitted_at = datetime.now().isoformat()
+
+        params = {
+            'model_id': model_id,
+            'model_path': model_path,
+            'days': days,
+            'start_date': start_date,
+            'end_date': end_date,
+            'timesteps': timesteps,
+            'eval_episodes': eval_episodes,
+            'dry_run': dry_run,
+            'clear_buffer': clear_buffer,
+            'save_artifacts': save_artifacts,
+            'version_suffix': version_suffix,
+        }
+
+        fine_tune_jobs[job_id] = {
+            'status': 'queued',
+            'submitted_at': submitted_at,
+            'params': params,
+        }
+
+        def run_fine_tune():
+            try:
+                fine_tune_jobs[job_id]['status'] = 'running'
+                fine_tune_jobs[job_id]['started_at'] = datetime.now().isoformat()
+
+                result = fine_tune_model(**params)
+
+                status_value = result.get('status') or 'success'
+                fine_tune_jobs[job_id]['status'] = status_value
+                fine_tune_jobs[job_id]['result'] = result
+                fine_tune_jobs[job_id]['success'] = status_value == 'success'
+            except Exception as exc:  # pragma: no cover - background safeguard
+                logger.error("Fine-tune job %s failed: %s", job_id, exc, exc_info=True)
+                fine_tune_jobs[job_id]['status'] = 'failed'
+                fine_tune_jobs[job_id]['error'] = str(exc)
+                fine_tune_jobs[job_id]['success'] = False
+            finally:
+                fine_tune_jobs[job_id]['completed_at'] = datetime.now().isoformat()
+
+        thread = threading.Thread(target=run_fine_tune, daemon=True)
+        thread.start()
+        fine_tune_threads[job_id] = thread
+
+        return jsonify({
+            'status': 'accepted',
+            'job_id': job_id,
+            'submitted_at': submitted_at,
+        }), 202
+
+    except Exception as exc:
+        logger.error("Error triggering fine-tune: %s", exc, exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'error': str(exc)
+        }), 500
+
+
+@app.route('/api/training/fine_tune/<job_id>', methods=['GET'])
+def get_fine_tune_status(job_id: str):
+    """Return status payload for a fine-tune job."""
+
+    job = fine_tune_jobs.get(job_id)
+    if not job:
+        return jsonify({
+            'status': 'error',
+            'error': 'fine_tune_job_not_found',
+            'job_id': job_id,
+        }), 404
+
+    payload = dict(job)
+    payload['job_id'] = job_id
+    return jsonify(payload), 200
 
 
 @app.route('/api/training/models', methods=['GET'])

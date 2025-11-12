@@ -1,0 +1,83 @@
+{
+  "window": {
+    "train_start": "2021-01-04",
+    "train_end": "2021-03-26",
+    "test_start": "2021-03-29",
+    "test_end": "2021-04-02"
+  },
+  "symbol": "TNA",
+  "benchmark": "IWM",
+  "interval": "15m",
+  "metrics": {
+    "sharpe_ratio": 0.0,
+    "sortino_ratio": 0.0,
+    "max_drawdown": 0.0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "total_return": 0.0,
+    "calmar_ratio": 0.0,
+    "final_balance": 100000.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0
+  },
+  "session_breakdown": [
+    {
+      "index": 0,
+      "session_date": "2021-04-01",
+      "steps": 25,
+      "final_balance": 100000.0,
+      "session_return": 0.0
+    }
+  ],
+  "equity_curve": [
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0,
+    100000.0
+  ],
+  "trades": [],
+  "model_metadata": {
+    "model_id": "sac_TNA_v20251111_090053",
+    "model_path": "backend\\models\\sac\\sac_TNA_v20251111_090053.zip",
+    "version": "v20251111_090053"
+  },
+  "commission": {
+    "type": "ibkr_tiered_us_equities",
+    "per_share": 0.01,
+    "min_fee": 2.5,
+    "max_pct": 0.01
+  },
+  "slippage": {
+    "buy_bps": 0.0,
+    "sell_bps": 0.0,
+    "buy_per_share": 0.0,
+    "sell_per_share": 0.0
+  },
+  "reward_mode": "dsr",
+  "created_at": "2025-11-11T07:00:54.092687+00:00"
+}

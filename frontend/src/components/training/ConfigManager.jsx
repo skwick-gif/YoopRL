@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { DEFAULT_COMMISSION_CONFIG } from '../../hooks/useTrainingState';
+import { DEFAULT_COMMISSION_CONFIG, DEFAULT_INTRADAY_EXECUTION } from '../../hooks/useTrainingState';
 
 const todayIso = () => new Date().toISOString().split('T')[0];
 
@@ -47,6 +47,64 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
       ...overrides,
       commission: overrides.commission ?? baseSettings.commission
     };
+  };
+
+  const applyIntradayDefaults = (config, overrides = {}) => {
+    const cloned = JSON.parse(JSON.stringify(config));
+    cloned.agent_type = 'SAC_INTRADAY_DSR';
+
+    const baseSettings = { ...(cloned.training_settings || {}) };
+    const benchmarkSymbol = overrides.benchmark_symbol
+      || baseSettings.benchmark_symbol
+      || 'IWM';
+
+    const slippageOverrides = overrides.slippage || baseSettings.slippage || {};
+    const resolvedSlippage = {
+      buy_bps: slippageOverrides.buy_bps ?? DEFAULT_INTRADAY_EXECUTION.slippage_bps,
+      sell_bps: slippageOverrides.sell_bps ?? DEFAULT_INTRADAY_EXECUTION.slippage_bps,
+      buy_per_share: slippageOverrides.buy_per_share ?? DEFAULT_INTRADAY_EXECUTION.slippage_per_share,
+      sell_per_share: slippageOverrides.sell_per_share ?? DEFAULT_INTRADAY_EXECUTION.slippage_per_share,
+    };
+
+    cloned.training_settings = {
+      ...baseSettings,
+      data_frequency: 'intraday',
+      interval: '15m',
+      reward_mode: 'dsr',
+      benchmark_symbol: benchmarkSymbol,
+      benchmark_interval: '15m',
+      intraday_enabled: true,
+      train_split: baseSettings.train_split ?? 0.8,
+      episode_budget: baseSettings.episode_budget ?? 300,
+      max_total_timesteps: baseSettings.max_total_timesteps ?? 500000,
+      slippage: resolvedSlippage,
+      slippage_bps: resolvedSlippage.buy_bps,
+      slippage_per_share: resolvedSlippage.buy_per_share,
+      forced_exit_minutes: overrides.forced_exit_minutes ?? baseSettings.forced_exit_minutes ?? DEFAULT_INTRADAY_EXECUTION.forced_exit_minutes,
+      forced_exit_tolerance: overrides.forced_exit_tolerance ?? baseSettings.forced_exit_tolerance ?? DEFAULT_INTRADAY_EXECUTION.forced_exit_tolerance,
+      forced_exit_column: overrides.forced_exit_column ?? baseSettings.forced_exit_column ?? DEFAULT_INTRADAY_EXECUTION.forced_exit_column,
+      dsr_config: baseSettings.dsr_config || {
+        decay: 0.97,
+        epsilon: 1e-9,
+        warmup_steps: 150,
+        clip_value: 4.0,
+      },
+    };
+
+    return cloned;
+  };
+
+  const buildIntradayPresetMap = (sacPresets) => {
+    const entries = Object.entries(sacPresets).map(([key, preset]) => {
+      const clonedPreset = JSON.parse(JSON.stringify(preset));
+      clonedPreset.name = `${preset.name} (Intraday)`;
+      clonedPreset.description = `${preset.description} • 15m intraday flow with forced close at 15:45 ET.`;
+      clonedPreset.config = applyIntradayDefaults(clonedPreset.config, {
+        benchmark_symbol: clonedPreset.config.training_settings?.benchmark_symbol || 'IWM',
+      });
+      return [key, clonedPreset];
+    });
+    return Object.fromEntries(entries);
   };
 
   const presets = {
@@ -332,8 +390,15 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
     }
   };
 
+  presets.SAC_INTRADAY_DSR = buildIntradayPresetMap(presets.SAC);
+
   // Get presets for current agent type
   const currentPresets = presets[agentType] || presets.PPO;
+  const presetAgentLabel = agentType === 'PPO'
+    ? 'Stock'
+    : agentType === 'SAC_INTRADAY_DSR'
+      ? 'Intraday ETF'
+      : 'ETF';
 
   useEffect(() => {
     return () => {
@@ -368,7 +433,7 @@ const ConfigManager = ({ onLoadConfig, agentType, compact = false }) => {
   return (
     <div style={containerStyle}>
       <span style={labelStyle}>
-        Quick Presets {agentType && `(${agentType === 'PPO' ? 'Stock' : 'ETF'})`}
+        Quick Presets {agentType && `(${presetAgentLabel})`}
       </span>
       <div style={styles.buttonRow}>
         {Object.entries(currentPresets).map(([key, preset]) => (

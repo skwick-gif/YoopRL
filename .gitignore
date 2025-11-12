@@ -292,3 +292,4 @@ tmp/
 # Test scripts created during development/debugging
 test_*.py
 Test Files/
+!backend/test_intraday_env.py

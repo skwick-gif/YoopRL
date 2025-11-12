@@ -55,7 +55,9 @@ class PPOAgent:
         self, 
         env, 
         hyperparameters: Dict[str, Any],
-        model_dir: str = 'backend/models/ppo'
+        model_dir: str = 'backend/models/ppo',
+        *,
+        seed: Optional[int] = None
     ):
         """
         Initialize PPO Agent
@@ -71,11 +73,28 @@ class PPOAgent:
                 - clip_range: float (optional)
                 - ent_coef: float (optional)
             model_dir: Path to save models
+            seed: Optional random seed for deterministic initialization
         """
+        def _make_env():
+            if seed is not None:
+                if hasattr(env, 'reset'):
+                    try:
+                        env.reset(seed=seed)
+                    except TypeError:
+                        env.reset()  # type: ignore[call-arg]
+                action_space = getattr(env, 'action_space', None)
+                if action_space is not None and hasattr(action_space, 'seed'):
+                    action_space.seed(seed)
+                observation_space = getattr(env, 'observation_space', None)
+                if observation_space is not None and hasattr(observation_space, 'seed'):
+                    observation_space.seed(seed)
+            return env
+
         # Wrap environment for vectorization (required by SB3)
-        self.env = DummyVecEnv([lambda: env])
+        self.env = DummyVecEnv([_make_env])
         self.hyperparameters = hyperparameters
         self.model_dir = model_dir
+        self.seed = seed
         
         # Create model directory
         os.makedirs(model_dir, exist_ok=True)
@@ -108,8 +127,15 @@ class PPOAgent:
             },
             device=device,  # GPU support
             verbose=1,
-            tensorboard_log=f"{model_dir}/tensorboard/"
+            tensorboard_log=f"{model_dir}/tensorboard/",
+            seed=seed,
         )
+
+        if seed is not None:
+            try:
+                self.env.seed(seed)
+            except AttributeError:
+                pass
         
         print(f"✅ PPO Agent initialized")
         print(f"   Device: {device.upper()}")

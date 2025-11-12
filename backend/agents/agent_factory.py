@@ -60,7 +60,9 @@ class AgentFactory:
         agent_type: str,
         env,
         hyperparameters: Dict[str, Any],
-        model_dir: Optional[str] = None
+        model_dir: Optional[str] = None,
+        *,
+        seed: Optional[int] = None,
     ) -> BaseAgent:
         """
         Create an agent instance
@@ -70,6 +72,7 @@ class AgentFactory:
             env: Trading environment (Gym-compatible)
             hyperparameters: Dict of algorithm-specific hyperparameters
             model_dir: Directory to save models (optional)
+            seed: Optional random seed for deterministic initialization
         
         Returns:
             agent: Instance of BaseAgent (PPOAgent or SACAgent)
@@ -100,14 +103,16 @@ class AgentFactory:
             agent = PPOAgent(
                 env=env,
                 hyperparameters=hyperparameters,
-                model_dir=model_dir
+                model_dir=model_dir,
+                seed=seed,
             )
         
         elif agent_type == 'SAC':
             agent = SACAgent(
                 env=env,
                 hyperparameters=hyperparameters,
-                model_dir=model_dir
+                model_dir=model_dir,
+                seed=seed,
             )
         
         print(f"✅ Agent created: {agent_type}")

@@ -37,6 +37,14 @@ export const DEFAULT_COMMISSION_CONFIG = Object.freeze({
   max_pct: 0.01,
 });
 
+export const DEFAULT_INTRADAY_EXECUTION = Object.freeze({
+  slippage_bps: 1.5,
+  slippage_per_share: 0.0,
+  forced_exit_minutes: 375.0,
+  forced_exit_tolerance: 2.0,
+  forced_exit_column: 'minutes_from_open',
+});
+
 export const useTrainingState = () => {
   // ===== PPO Hyperparameters (Stock Trading) =====
   const [ppoSymbol, setPpoSymbol] = useState('AAPL');
@@ -66,6 +74,13 @@ export const useTrainingState = () => {
   const [sacTimeFrame, setSacTimeFrame] = useState('daily');
   const [sacInitialCapital, setSacInitialCapital] = useState(10000);
   const [sacMaxPosition, setSacMaxPosition] = useState(50);
+
+  // Intraday execution controls
+  const [intradaySlippageBps, setIntradaySlippageBps] = useState(DEFAULT_INTRADAY_EXECUTION.slippage_bps);
+  const [intradaySlippagePerShare, setIntradaySlippagePerShare] = useState(DEFAULT_INTRADAY_EXECUTION.slippage_per_share);
+  const [forcedExitMinutes, setForcedExitMinutes] = useState(DEFAULT_INTRADAY_EXECUTION.forced_exit_minutes);
+  const [forcedExitTolerance, setForcedExitTolerance] = useState(DEFAULT_INTRADAY_EXECUTION.forced_exit_tolerance);
+  const [forcedExitColumn, setForcedExitColumn] = useState(DEFAULT_INTRADAY_EXECUTION.forced_exit_column);
 
   // ===== Training Settings =====
   // Get current date in YYYY-MM-DD format
@@ -267,7 +282,39 @@ export const useTrainingState = () => {
         warmup_steps: 150,
         clip_value: 4.0
       };
-  config.training_settings.intraday_enabled = true;
+      config.training_settings.intraday_enabled = true;
+
+      const parsedBps = Number.parseFloat(intradaySlippageBps);
+      const normalizedSlippageBps = Number.isFinite(parsedBps)
+        ? Math.max(0, parsedBps)
+        : DEFAULT_INTRADAY_EXECUTION.slippage_bps;
+      const parsedPerShare = Number.parseFloat(intradaySlippagePerShare);
+      const normalizedPerShare = Number.isFinite(parsedPerShare)
+        ? Math.max(0, parsedPerShare)
+        : DEFAULT_INTRADAY_EXECUTION.slippage_per_share;
+      config.training_settings.slippage = {
+        buy_bps: normalizedSlippageBps,
+        sell_bps: normalizedSlippageBps,
+        buy_per_share: normalizedPerShare,
+        sell_per_share: normalizedPerShare,
+      };
+      config.training_settings.slippage_bps = normalizedSlippageBps;
+      config.training_settings.slippage_per_share = normalizedPerShare;
+
+      const exitMinutesRaw = Number.parseFloat(forcedExitMinutes);
+      if (Number.isFinite(exitMinutesRaw)) {
+        config.training_settings.forced_exit_minutes = Math.max(0, exitMinutesRaw);
+      }
+
+      const exitToleranceRaw = Number.parseFloat(forcedExitTolerance);
+      if (Number.isFinite(exitToleranceRaw)) {
+        config.training_settings.forced_exit_tolerance = Math.max(0, exitToleranceRaw);
+      }
+
+      const exitColumn = ((forcedExitColumn || '').trim()).toLowerCase();
+      if (exitColumn && exitColumn !== 'auto') {
+        config.training_settings.forced_exit_column = forcedExitColumn.trim();
+      }
     }
 
     return config;
@@ -322,6 +369,19 @@ export const useTrainingState = () => {
       if (!benchmark) {
         errors.push('Benchmark symbol could not be determined for intraday SAC');
       }
+
+      if (Number.parseFloat(intradaySlippageBps) < 0) {
+        errors.push('Slippage (bps) must be zero or positive');
+      }
+      if (Number.parseFloat(intradaySlippagePerShare) < 0) {
+        errors.push('Slippage ($/share) must be zero or positive');
+      }
+      if (Number.parseFloat(forcedExitMinutes) < 0) {
+        errors.push('Forced exit minutes must be zero or positive');
+      }
+      if (Number.parseFloat(forcedExitTolerance) < 0) {
+        errors.push('Forced exit tolerance must be zero or positive');
+      }
     }
 
     return {
@@ -345,18 +405,25 @@ export const useTrainingState = () => {
 
     // SAC defaults
     setSacSymbol('TNA');
-  setSacLearningRate(0.0003);
-  setSacEntropy(0.2);
-  setSacBatchSize(256);
-  setSacVolPenalty(-0.3);
-  setSacEpisodes(45000);
-  setSacRetrain('Weekly');
-  setSacBenchmarkSymbol('IWM');
+    setSacLearningRate(0.0003);
+    setSacEntropy(0.2);
+    setSacBatchSize(256);
+    setSacVolPenalty(-0.3);
+    setSacEpisodes(45000);
+    setSacRetrain('Weekly');
+    setSacBenchmarkSymbol('IWM');
+
+    // Intraday execution defaults
+    setIntradaySlippageBps(DEFAULT_INTRADAY_EXECUTION.slippage_bps);
+    setIntradaySlippagePerShare(DEFAULT_INTRADAY_EXECUTION.slippage_per_share);
+    setForcedExitMinutes(DEFAULT_INTRADAY_EXECUTION.forced_exit_minutes);
+    setForcedExitTolerance(DEFAULT_INTRADAY_EXECUTION.forced_exit_tolerance);
+    setForcedExitColumn(DEFAULT_INTRADAY_EXECUTION.forced_exit_column);
 
     // Training settings defaults
     setStartDate('2023-01-01');
     setEndDate('2024-11-01');
-  setCommission(DEFAULT_COMMISSION_CONFIG.per_share);
+    setCommission(DEFAULT_COMMISSION_CONFIG.per_share);
     setOptunaTrials(100);
 
     // Features defaults
@@ -402,6 +469,11 @@ export const useTrainingState = () => {
     sacTimeFrame, setSacTimeFrame,
     sacInitialCapital, setSacInitialCapital,
     sacMaxPosition, setSacMaxPosition,
+  intradaySlippageBps, setIntradaySlippageBps,
+  intradaySlippagePerShare, setIntradaySlippagePerShare,
+  forcedExitMinutes, setForcedExitMinutes,
+  forcedExitTolerance, setForcedExitTolerance,
+  forcedExitColumn, setForcedExitColumn,
 
     // Training Settings
     startDate, setStartDate,

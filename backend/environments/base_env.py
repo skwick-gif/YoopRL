@@ -60,7 +60,8 @@ class BaseTradingEnv(gym.Env, ABC):
         commission: Union[float, Dict[str, float]] = 1.0,
         max_position_size: float = 1.0,
         normalize_obs: bool = True,
-        history_config: Optional[Dict] = None
+        history_config: Optional[Dict] = None,
+        slippage_config: Optional[Dict[str, float]] = None
     ):
         """
         Initialize base trading environment.
@@ -91,6 +92,8 @@ class BaseTradingEnv(gym.Env, ABC):
             self.commission = self._commission_value
         self.max_position_size = max_position_size
         self.normalize_obs = normalize_obs
+        self.slippage_config = self._normalize_slippage_config(slippage_config)
+        self._has_slippage = any(value > 0 for value in self.slippage_config.values())
         
         # Portfolio state
         self.current_step = 0
@@ -105,6 +108,10 @@ class BaseTradingEnv(gym.Env, ABC):
         self.position_history = []
         self.reward_history = []
         self._prev_holdings = 0
+        self._last_commission = 0.0
+        self._last_slippage = 0.0
+        self._last_transaction_cost = 0.0
+        self._last_trade_size = 0
 
         # History feature configuration
         self.history_config = history_config or {}
@@ -325,6 +332,10 @@ class BaseTradingEnv(gym.Env, ABC):
         self.portfolio_history = [self.initial_capital]
         self.position_history = [0.0]
         self.reward_history = []
+        self._last_commission = 0.0
+        self._last_slippage = 0.0
+        self._last_transaction_cost = 0.0
+        self._last_trade_size = 0
         
         # Calculate normalization parameters on first reset
         if self.normalize_obs and self.obs_mean is None:
@@ -381,7 +392,11 @@ class BaseTradingEnv(gym.Env, ABC):
             'holdings': self.holdings,
             'position_value': self.position_value,
             'current_price': current_price,
-            'action': action
+            'action': action,
+            'trade_shares': self._last_trade_size,
+            'commission': self._last_commission,
+            'slippage': self._last_slippage,
+            'transaction_cost': self._last_transaction_cost
         }
         
         return obs, reward, terminated, truncated, info
@@ -394,6 +409,8 @@ class BaseTradingEnv(gym.Env, ABC):
             action: 0=HOLD, 1=BUY, 2=SELL
             current_price: Current asset price
         """
+        self._register_transaction_costs(0.0, 0.0, 0)
+
         if action == 1:  # BUY
             spendable_cash = min(self.cash, self.cash * self.max_position_size)
             if current_price <= 0 or spendable_cash <= 0:
@@ -401,27 +418,34 @@ class BaseTradingEnv(gym.Env, ABC):
 
             max_shares = int(spendable_cash / current_price)
             while max_shares > 0:
-                fee = self._calculate_commission(max_shares, current_price)
-                cost = max_shares * current_price + fee
+                commission, slippage, total_costs = self._compute_trade_costs(max_shares, current_price, action)
+                cost = max_shares * current_price + total_costs
                 if cost <= spendable_cash and cost <= self.cash:
                     break
                 max_shares -= 1
 
             if max_shares > 0:
-                fee = self._calculate_commission(max_shares, current_price)
-                total_cost = max_shares * current_price + fee
+                commission, slippage, total_costs = self._compute_trade_costs(max_shares, current_price, action)
+                total_cost = max_shares * current_price + total_costs
                 if total_cost <= self.cash:
                     self.cash -= total_cost
                     self.holdings += max_shares
+                    self._register_transaction_costs(commission, slippage, max_shares)
         
         elif action == 2:  # SELL
             if self.holdings > 0 and current_price > 0:
-                fee = self._calculate_commission(self.holdings, current_price)
-                gross = self.holdings * current_price
-                fee = min(fee, gross)
-                revenue = gross - fee
+                shares_to_sell = self.holdings
+                commission, slippage, total_costs = self._compute_trade_costs(shares_to_sell, current_price, action)
+                gross = shares_to_sell * current_price
+                if total_costs > gross and total_costs > 0:
+                    scale = gross / total_costs
+                    commission *= scale
+                    slippage *= scale
+                    total_costs = gross
+                revenue = gross - total_costs
                 self.cash += revenue
                 self.holdings = 0
+                self._register_transaction_costs(commission, slippage, shares_to_sell)
         
         # action == 0 (HOLD) does nothing
 
@@ -444,6 +468,110 @@ class BaseTradingEnv(gym.Env, ABC):
 
         fee = self._commission_value
         return float(fee) if fee > 0 else 0.0
+
+    @staticmethod
+    def _normalize_slippage_config(config: Optional[Dict[str, float]]) -> Dict[str, float]:
+        defaults = {
+            'buy_bps': 0.0,
+            'sell_bps': 0.0,
+            'buy_per_share': 0.0,
+            'sell_per_share': 0.0,
+        }
+
+        if config is None:
+            return defaults
+
+        if isinstance(config, (int, float)):
+            value = max(0.0, float(config))
+            defaults['buy_bps'] = value
+            defaults['sell_bps'] = value
+            return defaults
+
+        if not isinstance(config, dict):
+            return defaults
+
+        shared_bps_keys = ('bps', 'basis_points', 'basisPoints')
+        for key in shared_bps_keys:
+            raw_value = config.get(key)
+            if raw_value is not None:
+                try:
+                    value = max(0.0, float(raw_value))
+                except (TypeError, ValueError):
+                    continue
+                defaults['buy_bps'] = value
+                defaults['sell_bps'] = value
+                break
+
+        if 'buy_bps' in config:
+            try:
+                defaults['buy_bps'] = max(0.0, float(config['buy_bps']))
+            except (TypeError, ValueError):
+                pass
+        if 'sell_bps' in config:
+            try:
+                defaults['sell_bps'] = max(0.0, float(config['sell_bps']))
+            except (TypeError, ValueError):
+                pass
+
+        shared_per_share_keys = ('per_share', 'perShare', 'per_trade_slippage', 'perTradeSlippage')
+        for key in shared_per_share_keys:
+            raw_value = config.get(key)
+            if raw_value is not None:
+                try:
+                    value = max(0.0, float(raw_value))
+                except (TypeError, ValueError):
+                    continue
+                defaults['buy_per_share'] = value
+                defaults['sell_per_share'] = value
+                break
+
+        if 'buy_per_share' in config:
+            try:
+                defaults['buy_per_share'] = max(0.0, float(config['buy_per_share']))
+            except (TypeError, ValueError):
+                pass
+        if 'sell_per_share' in config:
+            try:
+                defaults['sell_per_share'] = max(0.0, float(config['sell_per_share']))
+            except (TypeError, ValueError):
+                pass
+
+        return defaults
+
+    def _calculate_slippage(self, shares: int, price: float, action: int) -> float:
+        if shares <= 0 or price <= 0 or not self._has_slippage:
+            return 0.0
+
+        cfg = self.slippage_config
+        direction = 'buy' if action == 1 else 'sell' if action == 2 else None
+        if direction is None:
+            return 0.0
+
+        bps_key = f"{direction}_bps"
+        per_share_key = f"{direction}_per_share"
+
+        bps_value = float(cfg.get(bps_key, 0.0))
+        per_share_value = float(cfg.get(per_share_key, 0.0))
+
+        slippage = 0.0
+        if bps_value > 0.0:
+            slippage += shares * price * (bps_value / 10000.0)
+        if per_share_value > 0.0:
+            slippage += shares * per_share_value
+
+        return float(max(slippage, 0.0))
+
+    def _compute_trade_costs(self, shares: int, price: float, action: int) -> Tuple[float, float, float]:
+        commission = self._calculate_commission(shares, price)
+        slippage = self._calculate_slippage(shares, price, action)
+        total = commission + slippage
+        return float(commission), float(slippage), float(total)
+
+    def _register_transaction_costs(self, commission: float, slippage: float, shares: int):
+        self._last_commission = float(max(commission, 0.0))
+        self._last_slippage = float(max(slippage, 0.0))
+        self._last_transaction_cost = self._last_commission + self._last_slippage
+        self._last_trade_size = int(max(shares, 0))
     
     def _get_observation(self) -> np.ndarray:
         """

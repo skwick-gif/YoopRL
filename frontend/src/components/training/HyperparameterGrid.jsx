@@ -184,7 +184,11 @@ function HyperparameterGrid({ agentType, trainingState, onLoadConfig, isIntraday
               {isIntraday ? 'SAC + DSR Hyperparameters (15m Intraday)' : 'SAC Hyperparameters (ETF)'}
             </div>
             {onLoadConfig && (
-              <ConfigManager agentType="SAC" onLoadConfig={onLoadConfig} compact />
+              <ConfigManager
+                agentType={isIntraday ? 'SAC_INTRADAY_DSR' : 'SAC'}
+                onLoadConfig={onLoadConfig}
+                compact
+              />
             )}
           </div>
           {isIntraday && (
@@ -341,6 +345,68 @@ function HyperparameterGrid({ agentType, trainingState, onLoadConfig, isIntraday
               title="Optuna Trials: Number of hyperparameter combinations to test. More trials = better optimization but longer training. 50-200 trials is typical."
             />
           </ParamItem>
+          {isIntraday && (
+            <>
+              <ParamItem label="Slippage (bps)">
+                <input
+                  type="number"
+                  className="param-input"
+                  value={trainingState.intradaySlippageBps}
+                  onChange={(e) => trainingState.setIntradaySlippageBps(parseFloat(e.target.value) || 0)}
+                  step="0.1"
+                  min="0"
+                  title="Estimated round-trip slippage expressed in basis points. Applied symmetrically to buys and sells."
+                />
+              </ParamItem>
+              <ParamItem label="Slippage ($/share)">
+                <input
+                  type="number"
+                  className="param-input"
+                  value={trainingState.intradaySlippagePerShare}
+                  onChange={(e) => trainingState.setIntradaySlippagePerShare(parseFloat(e.target.value) || 0)}
+                  step="0.005"
+                  min="0"
+                  title="Optional absolute slippage per share (in USD). Useful when spreads remain fixed in cents."
+                />
+              </ParamItem>
+              <ParamItem label="Forced Exit (minutes)">
+                <input
+                  type="number"
+                  className="param-input"
+                  value={trainingState.forcedExitMinutes}
+                  onChange={(e) => trainingState.setForcedExitMinutes(parseFloat(e.target.value) || 0)}
+                  step="1"
+                  min="0"
+                  title="Minute-of-session cutoff for forced liquidation (market open = 0). 375 corresponds to 15:45 New York."
+                />
+              </ParamItem>
+              <ParamItem label="Exit Tolerance (min)">
+                <input
+                  type="number"
+                  className="param-input"
+                  value={trainingState.forcedExitTolerance}
+                  onChange={(e) => trainingState.setForcedExitTolerance(parseFloat(e.target.value) || 0)}
+                  step="0.5"
+                  min="0"
+                  title="Grace window before the forced exit triggers. Helps avoid premature exits due to clock jitter."
+                />
+              </ParamItem>
+              <ParamItem label="Exit Signal Column">
+                <select
+                  className="param-input"
+                  value={trainingState.forcedExitColumn || ''}
+                  onChange={(e) => trainingState.setForcedExitColumn(e.target.value)}
+                  title="Which metadata column the environment should inspect for forced exit timing. Leave on minutes_from_open for default behaviour."
+                >
+                  <option value="minutes_from_open">minutes_from_open</option>
+                  <option value="time_fraction">time_fraction</option>
+                  <option value="timestamp">timestamp</option>
+                  <option value="is_session_end">is_session_end</option>
+                  <option value="auto">auto (use heuristics)</option>
+                </select>
+              </ParamItem>
+            </>
+          )}
         </div>
       </Card>
     </>

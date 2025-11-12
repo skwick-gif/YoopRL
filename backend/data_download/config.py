@@ -109,6 +109,12 @@ class APIKeysConfig:
         default_factory=lambda: os.getenv("NEWS_API_KEY", "")
     )
 
+    # Twelve Data - Intraday time series
+    # https://twelvedata.com
+    twelve_data_key: str = field(
+        default_factory=lambda: os.getenv("TWELVE_DATA_KEY", os.getenv("TWELVEDATA_API_KEY", ""))
+    )
+
 
 @dataclass
 class TrainingDataConfig:

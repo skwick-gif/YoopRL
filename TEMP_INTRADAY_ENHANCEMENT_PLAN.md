@@ -21,21 +21,19 @@ Structured execution plan to align the intraday SAC + DSR pipeline with the docu
 1. **Audit current generator**
    - File: `backend/training/walk_forward.py`
    - Action: Review `generate_walk_forward_windows` and current window logic.
-2. **Define canonical window set**
-   - Update `generate_walk_forward_windows` to handle explicit, documented sequences:
-     - 2018-01-01 → 2020-12-31 train / 2021-01-01 → 2021-12-31 test
-     - 2018-01-01 → 2021-12-31 train / 2022-01-01 → 2022-12-31 test
-     - 2018-01-01 → 2022-12-31 train / 2023-01-01 → 2023-12-31 test
-   - Provide configuration switch to fall back to auto mode.
+2. **Build dynamic cumulative windows**
+   - Update `generate_walk_forward_windows` so it derives earliest/latest dates from available intraday feeds (both primary symbol and benchmark).
+   - Starting from the earliest *full* train period (respecting `train_years`), create cumulative train windows and 1-year test windows while data allows; emit warnings if a full test year doesn't exist and optionally fall back to shorter evaluation spans.
+   - Allow manual overrides via config (explicit date ranges) and keep an `auto_generate=False` path that accepts user-supplied windows unchanged.
 3. **Update pipeline entry point**
    - File: `backend/training/walk_forward.py`
-   - Modify `run_walk_forward_training_pipeline` to consume the canonical window set when `auto_generate=False` and no custom windows provided.
+   - Modify `run_walk_forward_training_pipeline` to default to the dynamic builder when no explicit windows are passed, and to surface `info` logs summarizing the resolved windows (train/test spans, sample counts).
 4. **Validation**
-   - Unit-style run: call `python -m backend.training.walk_forward --dry-run` (add helper CLI if missing) to print the resolved windows without training.
+   - Unit-style run: call `python -m backend.training.walk_forward --dry-run` (add helper CLI if missing) to print resolved windows and ensure they honor available data and config toggles.
 
 ---
 
-## Phase 2 – Intraday Environment Enhancements
+## Phase 2 – Intraday Environment Enhancements *(completed 2025-11-10)*
 1. **Introduce slippage & closing logic**
    - File: `backend/environments/base_env.py`
      - Extend `_calculate_commission` signature or add `_calculate_transaction_costs` helper.
@@ -50,29 +48,31 @@ Structured execution plan to align the intraday SAC + DSR pipeline with the docu
    - File: `backend/training/rewards/dsr_wrapper.py`
      - Confirm the wrapper receives the net reward; adjust interface if necessary.
 4. **Validation**
-   - Add targeted unit tests:
-     - `backend/test_intraday_env.py` (new file) covering slippage math, forced exit time, and reward netting logic.
-   - Run: `pytest backend/test_intraday_env.py`
+    - Add targeted unit tests:
+       - `backend/test_intraday_env.py` (new file) covering slippage math, forced exit time, and reward netting logic.
+    - Run: `pytest backend/test_intraday_env.py` *(pass – Nov 10)*
 
 ---
 
-## Phase 3 – Training Workflow Updates
-1. **Training entry adjustments**
+## Phase 3 – Training Workflow Updates *(in progress)*
+1. **Training entry adjustments** *(backend wiring updated Nov 10; verify dataset columns before closing)*
    - File: `backend/training/train.py`
      - Update `_train_intraday_agent` to pass new slippage parameters and rely on sequential session sampler for evaluation.
      - Ensure training sampler behavior matches requirement (randomized for training, sequential for evaluation, no replay of future days in live-like evaluation).
-2. **Fine-Tune Pipeline**
+2. **Fine-Tune Pipeline** *(fine_tune.py + API endpoint completed 2025-11-10)*
    - New file: `backend/training/fine_tune.py`
      - Load latest SAC model, refill replay buffer with most recent N days, call `.learn(..., reset_num_timesteps=False)`.
      - Accept CLI args + API wrapper entry point.
    - File: `backend/api/main.py`
-     - Add endpoint for fine-tune trigger (protected route).
-3. **CLI/Script Support**
+       - Add endpoint for fine-tune trigger (protected route).
+3. **CLI/Script Support** *(run_walk_forward helper delivered 2025-11-10)*
    - File: `backend/scripts/run_walk_forward.py` (new helper) to orchestrate the training/evaluation flow using new windows.
 4. **Validation**
    - Smoke run: `python scripts/run_walk_forward.py --symbol TQQQ --dry-run`
    - Fine-tune dry run: `python -m backend.training.fine_tune --model-id <id> --days 30 --dry-run`
    - Full tests: `pytest backend/test_agent_manager_scheduler.py backend/test_live_scheduler_bridge.py`
+   - Long-form training run currently halts because the intraday loader cannot locate several 2021 sessions (missing CSVs/holiday handling); dataset backfill or holiday-aware skips still pending.
+   - Frontend/Phase 4 work may proceed, but be aware (1) E2E validation still fails until 2021 holiday gaps are handled, and (2) UI testing that exercises full walk-forward runs will block on the same issue.
 
 ---
 

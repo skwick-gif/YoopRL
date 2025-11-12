@@ -1,0 +1,802 @@
+{
+  "status": "completed",
+  "symbol": "TNA",
+  "benchmark": "IWM",
+  "interval": "15m",
+  "runs": [
+    {
+      "window": {
+        "train_start": "2021-01-04",
+        "train_end": "2021-01-29",
+        "test_start": "2021-02-01",
+        "test_end": "2021-02-05"
+      },
+      "train_result": {
+        "status": "success",
+        "model_path": "backend\\models\\sac\\sac_TNA_v20251111_115901.zip",
+        "metadata": {
+          "agent_type": "SAC_INTRADAY_DSR",
+          "canonical_agent_type": "SAC",
+          "symbol": "TNA",
+          "version": "v20251111_115901",
+          "created": "2025-11-11T11:59:01.842408",
+          "created_at": "2025-11-11T11:59:01.842408",
+          "hyperparameters": {
+            "learning_rate": 5e-05,
+            "buffer_size": 250000,
+            "batch_size": 256,
+            "tau": 0.005,
+            "gamma": 0.995,
+            "ent_coef": 0.2,
+            "target_entropy": -0.5,
+            "vol_penalty": 0.0,
+            "episodes": 22000
+          },
+          "features": {
+            "price": true,
+            "volume": true,
+            "ohlc": true,
+            "rsi": {
+              "enabled": true,
+              "period": 14
+            },
+            "macd": {
+              "enabled": true,
+              "params": "12,26,9"
+            },
+            "ema": {
+              "enabled": true,
+              "periods": "10,50"
+            },
+            "vix": false,
+            "bollinger": {
+              "enabled": false,
+              "params": "20,2"
+            },
+            "stochastic": {
+              "enabled": false,
+              "params": "14,3"
+            },
+            "adx": {
+              "enabled": true,
+              "period": 14
+            },
+            "multi_asset": {
+              "enabled": false,
+              "symbols": []
+            },
+            "base_trend_context": true,
+            "base_momentum": true,
+            "base_trend_strength": true,
+            "base_extremes": true,
+            "leveraged_volatility": true,
+            "leveraged_momentum_short": true,
+            "time_context": true,
+            "position_context": true,
+            "sentiment": false,
+            "macro": false,
+            "social_media": false,
+            "news_headlines": false,
+            "market_events": false,
+            "fundamental": false,
+            "recent_actions": false,
+            "performance": false,
+            "position_history": false,
+            "reward_history": false,
+            "llm": {
+              "enabled": false,
+              "provider": "Perplexity API"
+            }
+          },
+          "features_used": [
+            "tna_close",
+            "iwm_close",
+            "tna_volume",
+            "iwm_volume",
+            "tna_open",
+            "tna_high",
+            "tna_low",
+            "minutes_from_open",
+            "iwm_open",
+            "iwm_high",
+            "iwm_low",
+            "base_plus_di",
+            "base_minus_di",
+            "base_trend_context",
+            "base_momentum",
+            "base_trend_strength",
+            "base_extremes",
+            "leveraged_volatility",
+            "leveraged_momentum_short",
+            "bar_index",
+            "time_fraction",
+            "is_session_end",
+            "position_context",
+            "primary_return",
+            "benchmark_return"
+          ],
+          "training_settings": {
+            "start_date": "2021-01-04",
+            "end_date": "2021-01-29",
+            "commission": {
+              "type": "ibkr_tiered_us_equities",
+              "per_share": 0.01,
+              "min_fee": 2.5,
+              "max_pct": 0.01
+            },
+            "commission_model": "ibkr_tiered_us_equities",
+            "commission_min_fee": 2.5,
+            "commission_max_pct": 0.01,
+            "slippage": {
+              "buy_bps": 0.0,
+              "sell_bps": 0.0,
+              "buy_per_share": 0.0,
+              "sell_per_share": 0.0
+            },
+            "initial_capital": 100000.0,
+            "max_position_size": 1.0,
+            "optuna_trials": 0,
+            "normalize_obs": true,
+            "total_timesteps": 30000,
+            "max_total_timesteps": 35000,
+            "episode_budget": 700,
+            "data_frequency": "intraday",
+            "interval": "15m",
+            "benchmark_symbol": "IWM",
+            "benchmark_interval": "15m",
+            "reward_mode": "dsr",
+            "train_split": 0.8,
+            "dsr_config": {
+              "decay": 0.94,
+              "epsilon": 1e-09,
+              "warmup_steps": 200,
+              "clip_value": 6.0
+            },
+            "intraday_enabled": true,
+            "forced_exit_minutes": 375.0,
+            "forced_exit_tolerance": 1.0,
+            "forced_exit_column": null
+          },
+          "train_samples": 395,
+          "test_samples": 99,
+          "benchmark_symbol": "IWM",
+          "interval": "15m",
+          "data_frequency": "intraday",
+          "intraday_enabled": true,
+          "reward_mode": "dsr",
+          "dsr_config": {
+            "decay": 0.94,
+            "epsilon": 1e-09,
+            "warmup_steps": 200,
+            "clip_value": 6.0
+          },
+          "episodes_requested": 22000,
+          "episodes": 76,
+          "total_timesteps_requested": 30000,
+          "total_timesteps": 30000,
+          "training_duration_seconds": 626.807573,
+          "model_path": "backend\\models\\sac\\sac_TNA_v20251111_115901.zip",
+          "normalizer_path": "backend/models/normalizer_TNA_SAC_INTRADAY_DSR.json",
+          "sharpe_ratio": 0.0,
+          "sortino_ratio": 0.0,
+          "total_return": 0.0,
+          "max_drawdown": 0.0,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "calmar_ratio": 0.0,
+          "total_trades": 0,
+          "winning_trades": 0,
+          "losing_trades": 0,
+          "final_balance": 100000.0,
+          "equity_curve": [
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0
+          ],
+          "trade_history": [],
+          "model_id": "sac_TNA_v20251111_115901"
+        },
+        "version": "v20251111_115901",
+        "model_id": "sac_TNA_v20251111_115901"
+      },
+      "evaluation_result": {
+        "status": "failed",
+        "symbol": "TNA",
+        "agent_type": "SAC_INTRADAY_DSR",
+        "model_id": "sac_TNA_v20251111_115901",
+        "windows_evaluated": 0,
+        "windows_failed": 1,
+        "results": [],
+        "errors": [
+          {
+            "window": {
+              "train_start": "2021-01-04",
+              "train_end": "2021-01-29",
+              "test_start": "2021-02-01",
+              "test_end": "2021-02-05"
+            },
+            "error": "No intraday data available for validation window 2021-02-01 -> 2021-02-05"
+          }
+        ],
+        "created_at": "2025-11-11T09:59:02.173435+00:00"
+      }
+    },
+    {
+      "window": {
+        "train_start": "2021-01-04",
+        "train_end": "2021-02-26",
+        "test_start": "2021-03-01",
+        "test_end": "2021-03-05"
+      },
+      "train_result": {
+        "status": "success",
+        "model_path": "backend\\models\\sac\\sac_TNA_v20251111_120928.zip",
+        "metadata": {
+          "agent_type": "SAC_INTRADAY_DSR",
+          "canonical_agent_type": "SAC",
+          "symbol": "TNA",
+          "version": "v20251111_120928",
+          "created": "2025-11-11T12:09:28.593732",
+          "created_at": "2025-11-11T12:09:28.593732",
+          "hyperparameters": {
+            "learning_rate": 5e-05,
+            "buffer_size": 250000,
+            "batch_size": 256,
+            "tau": 0.005,
+            "gamma": 0.995,
+            "ent_coef": 0.2,
+            "target_entropy": -0.5,
+            "vol_penalty": 0.0,
+            "episodes": 22000
+          },
+          "features": {
+            "price": true,
+            "volume": true,
+            "ohlc": true,
+            "rsi": {
+              "enabled": true,
+              "period": 14
+            },
+            "macd": {
+              "enabled": true,
+              "params": "12,26,9"
+            },
+            "ema": {
+              "enabled": true,
+              "periods": "10,50"
+            },
+            "vix": false,
+            "bollinger": {
+              "enabled": false,
+              "params": "20,2"
+            },
+            "stochastic": {
+              "enabled": false,
+              "params": "14,3"
+            },
+            "adx": {
+              "enabled": true,
+              "period": 14
+            },
+            "multi_asset": {
+              "enabled": false,
+              "symbols": []
+            },
+            "base_trend_context": true,
+            "base_momentum": true,
+            "base_trend_strength": true,
+            "base_extremes": true,
+            "leveraged_volatility": true,
+            "leveraged_momentum_short": true,
+            "time_context": true,
+            "position_context": true,
+            "sentiment": false,
+            "macro": false,
+            "social_media": false,
+            "news_headlines": false,
+            "market_events": false,
+            "fundamental": false,
+            "recent_actions": false,
+            "performance": false,
+            "position_history": false,
+            "reward_history": false,
+            "llm": {
+              "enabled": false,
+              "provider": "Perplexity API"
+            }
+          },
+          "features_used": [
+            "tna_close",
+            "iwm_close",
+            "tna_volume",
+            "iwm_volume",
+            "tna_open",
+            "tna_high",
+            "tna_low",
+            "minutes_from_open",
+            "iwm_open",
+            "iwm_high",
+            "iwm_low",
+            "base_plus_di",
+            "base_minus_di",
+            "base_trend_context",
+            "base_momentum",
+            "base_trend_strength",
+            "base_extremes",
+            "leveraged_volatility",
+            "leveraged_momentum_short",
+            "bar_index",
+            "time_fraction",
+            "is_session_end",
+            "position_context",
+            "primary_return",
+            "benchmark_return"
+          ],
+          "training_settings": {
+            "start_date": "2021-01-04",
+            "end_date": "2021-02-26",
+            "commission": {
+              "type": "ibkr_tiered_us_equities",
+              "per_share": 0.01,
+              "min_fee": 2.5,
+              "max_pct": 0.01
+            },
+            "commission_model": "ibkr_tiered_us_equities",
+            "commission_min_fee": 2.5,
+            "commission_max_pct": 0.01,
+            "slippage": {
+              "buy_bps": 0.0,
+              "sell_bps": 0.0,
+              "buy_per_share": 0.0,
+              "sell_per_share": 0.0
+            },
+            "initial_capital": 100000.0,
+            "max_position_size": 1.0,
+            "optuna_trials": 0,
+            "normalize_obs": true,
+            "total_timesteps": 30000,
+            "max_total_timesteps": 35000,
+            "episode_budget": 700,
+            "data_frequency": "intraday",
+            "interval": "15m",
+            "benchmark_symbol": "IWM",
+            "benchmark_interval": "15m",
+            "reward_mode": "dsr",
+            "train_split": 0.8,
+            "dsr_config": {
+              "decay": 0.94,
+              "epsilon": 1e-09,
+              "warmup_steps": 200,
+              "clip_value": 6.0
+            },
+            "intraday_enabled": true,
+            "forced_exit_minutes": 375.0,
+            "forced_exit_tolerance": 1.0,
+            "forced_exit_column": null
+          },
+          "train_samples": 395,
+          "test_samples": 99,
+          "benchmark_symbol": "IWM",
+          "interval": "15m",
+          "data_frequency": "intraday",
+          "intraday_enabled": true,
+          "reward_mode": "dsr",
+          "dsr_config": {
+            "decay": 0.94,
+            "epsilon": 1e-09,
+            "warmup_steps": 200,
+            "clip_value": 6.0
+          },
+          "episodes_requested": 22000,
+          "episodes": 76,
+          "total_timesteps_requested": 30000,
+          "total_timesteps": 30000,
+          "training_duration_seconds": 625.714283,
+          "model_path": "backend\\models\\sac\\sac_TNA_v20251111_120928.zip",
+          "normalizer_path": "backend/models/normalizer_TNA_SAC_INTRADAY_DSR.json",
+          "sharpe_ratio": 0.0,
+          "sortino_ratio": 0.0,
+          "total_return": 0.0,
+          "max_drawdown": 0.0,
+          "win_rate": 0.0,
+          "profit_factor": 0.0,
+          "calmar_ratio": 0.0,
+          "total_trades": 0,
+          "winning_trades": 0,
+          "losing_trades": 0,
+          "final_balance": 100000.0,
+          "equity_curve": [
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0,
+            100000.0
+          ],
+          "trade_history": [],
+          "model_id": "sac_TNA_v20251111_120928"
+        },
+        "version": "v20251111_120928",
+        "model_id": "sac_TNA_v20251111_120928"
+      },
+      "evaluation_result": {
+        "status": "failed",
+        "symbol": "TNA",
+        "agent_type": "SAC_INTRADAY_DSR",
+        "model_id": "sac_TNA_v20251111_120928",
+        "windows_evaluated": 0,
+        "windows_failed": 1,
+        "results": [],
+        "errors": [
+          {
+            "window": {
+              "train_start": "2021-01-04",
+              "train_end": "2021-02-26",
+              "test_start": "2021-03-01",
+              "test_end": "2021-03-05"
+            },
+            "error": "No intraday data available for validation window 2021-03-01 -> 2021-03-05"
+          }
+        ],
+        "created_at": "2025-11-11T10:09:29.067740+00:00"
+      }
+    },
+    {
+      "window": {
+        "train_start": "2021-01-04",
+        "train_end": "2021-03-26",
+        "test_start": "2021-03-29",
+        "test_end": "2021-04-02"
+      },
+      "train_result": {
+        "status": "success",
+        "model_path": "backend\\models\\sac\\sac_TNA_v20251111_121954.zip",
+        "metadata": {
+          "agent_type": "SAC_INTRADAY_DSR",
+          "canonical_agent_type": "SAC",
+          "symbol": "TNA",
+          "version": "v20251111_121954",
+          "created": "2025-11-11T12:19:54.960562",
+          "created_at": "2025-11-11T12:19:54.960562",
+          "hyperparameters": {
+            "learning_rate": 5e-05,
+            "buffer_size": 250000,
+            "batch_size": 256,
+            "tau": 0.005,
+            "gamma": 0.995,
+            "ent_coef": 0.2,
+            "target_entropy": -0.5,
+            "vol_penalty": 0.0,
+            "episodes": 22000
+          },
+          "features": {
+            "price": true,
+            "volume": true,
+            "ohlc": true,
+            "rsi": {
+              "enabled": true,
+              "period": 14
+            },
+            "macd": {
+              "enabled": true,
+              "params": "12,26,9"
+            },
+            "ema": {
+              "enabled": true,
+              "periods": "10,50"
+            },
+            "vix": false,
+            "bollinger": {
+              "enabled": false,
+              "params": "20,2"
+            },
+            "stochastic": {
+              "enabled": false,
+              "params": "14,3"
+            },
+            "adx": {
+              "enabled": true,
+              "period": 14
+            },
+            "multi_asset": {
+              "enabled": false,
+              "symbols": []
+            },
+            "base_trend_context": true,
+            "base_momentum": true,
+            "base_trend_strength": true,
+            "base_extremes": true,
+            "leveraged_volatility": true,
+            "leveraged_momentum_short": true,
+            "time_context": true,
+            "position_context": true,
+            "sentiment": false,
+            "macro": false,
+            "social_media": false,
+            "news_headlines": false,
+            "market_events": false,
+            "fundamental": false,
+            "recent_actions": false,
+            "performance": false,
+            "position_history": false,
+            "reward_history": false,
+            "llm": {
+              "enabled": false,
+              "provider": "Perplexity API"
+            }
+          },
+          "features_used": [
+            "tna_close",
+            "iwm_close",
+            "tna_volume",
+            "iwm_volume",
+            "tna_open",
+            "tna_high",
+            "tna_low",
+            "minutes_from_open",
+            "iwm_open",
+            "iwm_high",
+            "iwm_low",
+            "base_plus_di",
+            "base_minus_di",
+            "base_trend_context",
+            "base_momentum",
+            "base_trend_strength",
+            "base_extremes",
+            "leveraged_volatility",
+            "leveraged_momentum_short",
+            "bar_index",
+            "time_fraction",
+            "is_session_end",
+            "position_context",
+            "primary_return",
+            "benchmark_return"
+          ],
+          "training_settings": {
+            "start_date": "2021-01-04",
+            "end_date": "2021-03-26",
+            "commission": {
+              "type": "ibkr_tiered_us_equities",
+              "per_share": 0.01,
+              "min_fee": 2.5,
+              "max_pct": 0.01
+            },
+            "commission_model": "ibkr_tiered_us_equities",
+            "commission_min_fee": 2.5,
+            "commission_max_pct": 0.01,
+            "slippage": {
+              "buy_bps": 0.0,
+              "sell_bps": 0.0,
+              "buy_per_share": 0.0,
+              "sell_per_share": 0.0
+            },
+            "initial_capital": 100000.0,
+            "max_position_size": 1.0,
+            "optuna_trials": 0,
+            "normalize_obs": true,
+            "total_timesteps": 30000,
+            "max_total_timesteps": 35000,
+            "episode_budget": 700,
+            "data_frequency": "intraday",
+            "interval": "15m",
+            "benchmark_symbol": "IWM",
+            "benchmark_interval": "15m",
+            "reward_mode": "dsr",
+            "train_split": 0.8,
+            "dsr_config": {
+              "decay": 0.94,
+              "epsilon": 1e-09,
+              "warmup_steps": 200,
+              "clip_value": 6.0
+            },
+            "intraday_enabled": true,
+            "forced_exit_minutes": 375.0,
+            "forced_exit_tolerance": 1.0,
+            "forced_exit_column": null
+          },
+          "train_samples": 395,
+          "test_samples": 99,
+          "benchmark_symbol": "IWM",
+          "interval": "15m",
+          "data_frequency": "intraday",
+          "intraday_enabled": true,
+          "reward_mode": "dsr",
+          "dsr_config": {
+            "decay": 0.94,
+            "epsilon": 1e-09,
+            "warmup_steps": 200,
+            "clip_value": 6.0
+          },
+          "episodes_requested": 22000,
+          "episodes": 76,
+          "total_timesteps_requested": 30000,
+          "total_timesteps": 30000,
+          "training_duration_seconds": 625.199811,
+          "model_path": "backend\\models\\sac\\sac_TNA_v20251111_121954.zip",
+          "normalizer_path": "backend/models/normalizer_TNA_SAC_INTRADAY_DSR.json",
+          "sharpe_ratio": -8.08,
+          "sortino_ratio": -8.15,
+          "total_return": -0.07,
+          "max_drawdown": -0.08,
+          "win_rate": 16.67,
+          "profit_factor": 0.51,
+          "calmar_ratio": -0.9,
+          "total_trades": 12,
+          "winning_trades": 2,
+          "losing_trades": 10,
+          "final_balance": 99929.0,
+          "equity_curve": [
+            100000.0,
+            99998.826,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99948.34421496582,
+            99947.16821496582,
+            100008.04559655763,
+            99980.62249661256,
+            99976.71979360962,
+            99975.54479360962,
+            99987.29486532594,
+            99986.11286532592,
+            99928.99886917115
+          ],
+          "trade_history": [
+            -11.690000000002328,
+            -262.4409994506859,
+            -11.759999999994761,
+            620.463815917974,
+            -11.789999999993597,
+            -39.02703002929047,
+            -11.75,
+            117.50071716308594,
+            -11.820000000006985,
+            -571.1399615478585,
+            -11.740000000005239,
+            -504.8178503418021
+          ],
+          "model_id": "sac_TNA_v20251111_121954"
+        },
+        "version": "v20251111_121954",
+        "model_id": "sac_TNA_v20251111_121954"
+      },
+      "evaluation_result": {
+        "status": "completed",
+        "symbol": "TNA",
+        "agent_type": "SAC_INTRADAY_DSR",
+        "model_id": "sac_TNA_v20251111_121954",
+        "windows_evaluated": 1,
+        "windows_failed": 0,
+        "results": [
+          {
+            "window": {
+              "train_start": "2021-01-04",
+              "train_end": "2021-03-26",
+              "test_start": "2021-03-29",
+              "test_end": "2021-04-02"
+            },
+            "symbol": "TNA",
+            "benchmark": "IWM",
+            "interval": "15m",
+            "metrics": {
+              "sharpe_ratio": 0.0,
+              "sortino_ratio": 0.0,
+              "max_drawdown": 0.0,
+              "win_rate": 0.0,
+              "profit_factor": 0.0,
+              "total_return": 0.0,
+              "calmar_ratio": 0.0,
+              "final_balance": 100000.0,
+              "total_trades": 0,
+              "winning_trades": 0,
+              "losing_trades": 0,
+              "avg_win": 0.0,
+              "avg_loss": 0.0
+            },
+            "session_breakdown": [
+              {
+                "index": 0,
+                "session_date": "2021-04-01",
+                "steps": 25,
+                "final_balance": 100000.0,
+                "session_return": 0.0
+              }
+            ],
+            "equity_curve": [
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0,
+              100000.0
+            ],
+            "trades": [],
+            "model_metadata": {
+              "model_id": "sac_TNA_v20251111_121954",
+              "model_path": "backend\\models\\sac\\sac_TNA_v20251111_121954.zip",
+              "version": "v20251111_121954"
+            },
+            "commission": {
+              "type": "ibkr_tiered_us_equities",
+              "per_share": 0.01,
+              "min_fee": 2.5,
+              "max_pct": 0.01
+            },
+            "slippage": {
+              "buy_bps": 0.0,
+              "sell_bps": 0.0,
+              "buy_per_share": 0.0,
+              "sell_per_share": 0.0
+            },
+            "reward_mode": "dsr",
+            "created_at": "2025-11-11T10:19:55.341558+00:00",
+            "artifact_path": "backend\\evaluation\\debug_v4\\TNA_20210329_20210402_walkforward.json"
+          }
+        ],
+        "errors": [],
+        "created_at": "2025-11-11T10:19:55.342557+00:00"
+      }
+    }
+  ],
+  "created_at": "2025-11-11T10:19:55.343558+00:00"
+}

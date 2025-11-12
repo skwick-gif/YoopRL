@@ -32,6 +32,7 @@ import gymnasium as gym
 sys.path.append(str(Path(__file__).parent.parent))
 
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.utils import set_random_seed
 from environments.stock_env import StockTradingEnv
 from environments.etf_env import ETFTradingEnv
 from environments.intraday_env import IntradayEquityEnv, IntradaySessionSampler
@@ -46,7 +47,7 @@ from data_download.intraday_loader import (
     build_intraday_dataset,
 )
 from data_download.intraday_features import IntradayFeatureSpec, add_intraday_features
-from training.commission import resolve_commission_config
+from training.commission import resolve_commission_config, resolve_slippage_config
 from training.rewards.dsr_wrapper import DSRConfig, DSRRewardWrapper
 
 
@@ -77,6 +78,51 @@ AGENT_ALIAS_MAP = {
 INTRADAY_FREQUENCY_FLAGS = {"intraday", "15m", "15min"}
 
 DEFAULT_MULTI_ASSET_SYMBOLS = ['SPY', 'QQQ', 'TLT', 'GLD']
+
+
+def _coerce_seed(value: Any) -> Optional[int]:
+    """Normalize user-provided random_seed values to integers."""
+
+    if value in (None, "", "None", "null"):
+        return None
+
+    try:
+        seed_value = int(value)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        raise ValueError("random_seed must be an integer when provided") from exc
+
+    if seed_value < 0:
+        raise ValueError("random_seed must be non-negative")
+
+    return seed_value
+
+
+def _apply_random_seed(seed: int) -> None:
+    """Apply deterministic seeding across supported backends."""
+
+    set_random_seed(seed)
+    np.random.seed(seed)
+
+
+def _seed_environment(env: Any, seed: int) -> None:
+    """Seed gym-style environments and their spaces when supported."""
+
+    if env is None:
+        return
+
+    if hasattr(env, 'reset'):
+        try:
+            env.reset(seed=seed)
+        except TypeError:
+            env.reset()  # type: ignore[call-arg]
+
+    action_space = getattr(env, 'action_space', None)
+    if action_space is not None and hasattr(action_space, 'seed'):
+        action_space.seed(seed)
+
+    observation_space = getattr(env, 'observation_space', None)
+    if observation_space is not None and hasattr(observation_space, 'seed'):
+        observation_space.seed(seed)
 
 
 def _canonical_agent_type(agent_type: str) -> str:
@@ -370,6 +416,12 @@ def _normalize_training_config(config: Any) -> Dict[str, Any]:
 
     train_split = _sanitize_train_split(training_settings.get('train_split', 0.8), default=0.8)
     training_settings['train_split'] = train_split
+
+    try:
+        random_seed = _coerce_seed(training_settings.get('random_seed'))
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    training_settings['random_seed'] = random_seed
 
     hyperparams = _resolve_hyperparameters(config_dict)
 
@@ -896,6 +948,16 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     canonical_agent_type = ctx['canonical_agent_type']
     hyperparams = ctx['hyperparams']
     train_split = ctx['train_split']
+    random_seed = training_settings.get('random_seed')
+
+    if random_seed is not None:
+        print(f"[SEED] Applying random seed: {random_seed}")
+        _apply_random_seed(random_seed)
+    random_seed = training_settings.get('random_seed')
+
+    if random_seed is not None:
+        print(f"[SEED] Applying random seed: {random_seed}")
+        _apply_random_seed(random_seed)
 
     reward_mode = str(training_settings.get('reward_mode', '')).lower()
     dsr_config_raw = training_settings.get('dsr_config') or {}
@@ -1033,12 +1095,16 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     else:
         raise ValueError(f"Unknown agent type: {requested_agent_type}")
 
+    if random_seed is not None:
+        _seed_environment(env, random_seed)
+
     print("\n[INFO] Creating RL agent...")
     agent = create_agent(
         agent_type=canonical_agent_type,
         env=env,
         hyperparameters=hyperparams,
-        model_dir=f"backend/models/{canonical_agent_type.lower()}"
+        model_dir=f"backend/models/{canonical_agent_type.lower()}",
+        seed=random_seed,
     )
     print(f"[OK] {canonical_agent_type} agent created")
 
@@ -1060,7 +1126,8 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
             agent_type=canonical_agent_type,
             env=env,
             hyperparameters=hyperparams,
-            model_dir=f"backend/models/{canonical_agent_type.lower()}"
+            model_dir=f"backend/models/{canonical_agent_type.lower()}",
+            seed=random_seed,
         )
         print("[OK] Agent recreated with optimized parameters")
 
@@ -1154,6 +1221,9 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
             base_test_env = DSRRewardWrapper(base_test_env, config=dsr_config_obj)
         test_env = ContinuousActionAdapter(base_test_env)
 
+    if random_seed is not None:
+        _seed_environment(test_env, random_seed)
+
     try:
         eval_results = evaluate_trained_model(
             model=agent.model,
@@ -1161,6 +1231,7 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
             n_eval_episodes=10,
             initial_capital=initial_capital,
             deterministic=True,
+            seed=random_seed,
         )
 
         test_metrics = eval_results['metrics']
@@ -1221,7 +1292,8 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
         'benchmark_symbol': benchmark_symbol,
         'interval': interval,
         'data_frequency': training_settings.get('data_frequency', 'daily'),
-    'intraday_enabled': bool(training_settings.get('intraday_enabled', False)),
+        'intraday_enabled': bool(training_settings.get('intraday_enabled', False)),
+        'random_seed': random_seed,
         'reward_mode': reward_mode,
         'dsr_config': dsr_config_raw if reward_mode == 'dsr' else {},
         'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,
@@ -1287,6 +1359,11 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     canonical_agent_type = ctx['canonical_agent_type']
     hyperparams = ctx['hyperparams']
     train_split = ctx['train_split']
+    random_seed = training_settings.get('random_seed')
+
+    if random_seed is not None:
+        print(f"[SEED] Applying random seed: {random_seed}")
+        _apply_random_seed(random_seed)
 
     if symbol not in ALLOWED_INTRADAY_SYMBOLS:
         allowed_list = ', '.join(sorted(ALLOWED_INTRADAY_SYMBOLS))
@@ -1410,6 +1487,10 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     normalize_obs = bool(training_settings.get('normalize_obs', True))
     history_config = _extract_history_config(features_payload)
     commission_config = resolve_commission_config(training_settings)
+    slippage_config = resolve_slippage_config(training_settings)
+    forced_exit_minutes = training_settings.get('forced_exit_minutes', 375.0)
+    forced_exit_tolerance = training_settings.get('forced_exit_tolerance', 1.0)
+    forced_exit_column = training_settings.get('forced_exit_column')
 
     sampler = IntradaySessionSampler(shuffle=True)
     base_env = IntradayEquityEnv(
@@ -1420,18 +1501,26 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         normalize_obs=normalize_obs,
         history_config=history_config,
         sampler=sampler,
+        slippage_config=slippage_config,
+        forced_exit_minutes=forced_exit_minutes,
+        forced_exit_tolerance=forced_exit_tolerance,
+        forced_exit_column=forced_exit_column,
     )
 
     training_env: Any = DSRRewardWrapper(base_env, config=dsr_config_obj)
     env = ContinuousActionAdapter(training_env)
     print("[OK] IntradayEquityEnv created (SAC)")
 
+    if random_seed is not None:
+        _seed_environment(env, random_seed)
+
     print("\n[INFO] Creating RL agent...")
     agent = create_agent(
         agent_type=canonical_agent_type,
         env=env,
         hyperparameters=hyperparams,
-        model_dir=f"backend/models/{canonical_agent_type.lower()}"
+        model_dir=f"backend/models/{canonical_agent_type.lower()}",
+        seed=random_seed,
     )
     print(f"[OK] {canonical_agent_type} agent created")
 
@@ -1515,8 +1604,15 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         normalize_obs=normalize_obs,
         history_config=history_config,
         sampler=eval_sampler,
+        slippage_config=slippage_config,
+        forced_exit_minutes=forced_exit_minutes,
+        forced_exit_tolerance=forced_exit_tolerance,
+        forced_exit_column=forced_exit_column,
     )
     test_env = ContinuousActionAdapter(DSRRewardWrapper(base_test_env, config=dsr_config_obj))
+
+    if random_seed is not None:
+        _seed_environment(test_env, random_seed)
 
     try:
         eval_results = evaluate_trained_model(
@@ -1525,6 +1621,7 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
             n_eval_episodes=10,
             initial_capital=initial_capital,
             deterministic=False,
+            seed=random_seed,
         )
 
         test_metrics = eval_results['metrics']
@@ -1585,7 +1682,8 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         'benchmark_symbol': benchmark_symbol,
         'interval': interval,
         'data_frequency': 'intraday',
-    'intraday_enabled': True,
+        'intraday_enabled': True,
+        'random_seed': random_seed,
         'reward_mode': reward_mode,
         'dsr_config': dsr_config_raw,
         'episodes_requested': int(requested_episode_budget) if requested_episode_budget is not None else None,

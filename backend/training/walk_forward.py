@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, UTC
@@ -13,6 +15,10 @@ import gymnasium as gym
 import numpy as np
 import pandas as pd
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:  # pragma: no cover - CLI convenience
+    sys.path.append(str(ROOT_DIR))
+
 from config.training_config import TrainingConfig, TrainingSettings
 from data_download.intraday_features import IntradayFeatureSpec, add_intraday_features
 from data_download.intraday_loader import build_intraday_dataset, get_intraday_date_bounds
@@ -21,10 +27,18 @@ from evaluation.metrics import calculate_all_metrics
 from models.model_manager import ModelManager
 from training.rewards.dsr_wrapper import DSRConfig, DSRRewardWrapper
 from training.train import train_agent
-from training.commission import resolve_commission_config
+from training.commission import resolve_commission_config, resolve_slippage_config
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 _HISTORY_KEYS = {"recent_actions", "performance", "position_history", "reward_history"}
+
+_AGENT_TYPE_ALIASES = {
+    "SAC_INTRADAY_DSR": "SAC",
+    "SAC_INTRADAY": "SAC",
+}
 
 
 class ContinuousActionAdapter(gym.ActionWrapper):
@@ -90,42 +104,72 @@ def generate_walk_forward_windows(
     interval: str = "15m",
     train_years: int = 2,
     test_years: int = 1,
+    *,
+    allow_partial_final: bool = True,
 ) -> List[WalkForwardWindow]:
-    """Construct rolling windows using available intraday data bounds."""
+    """Construct cumulative walk-forward windows using available intraday data bounds.
+
+    The initial training window spans ``train_years`` using the earliest overlapping data
+    between symbol and benchmark. Each subsequent window extends the training end to the
+    prior window's test end, ensuring cumulative learning. Test windows default to one year
+    and shrink only if ``allow_partial_final`` is True and insufficient data remains.
+    """
 
     benchmark = benchmark_symbol or _infer_benchmark_symbol(symbol)
 
     primary_bounds = get_intraday_date_bounds(symbol, interval)
     benchmark_bounds = get_intraday_date_bounds(benchmark, interval)
 
-    earliest = max(primary_bounds[0], benchmark_bounds[0])
-    latest = min(primary_bounds[1], benchmark_bounds[1])
+    earliest = max(primary_bounds[0], benchmark_bounds[0]).normalize()
+    latest = min(primary_bounds[1], benchmark_bounds[1]).normalize()
 
     if earliest >= latest:
         raise ValueError(
             f"Insufficient overlapping intraday data for {symbol}/{benchmark} ({interval})"
         )
 
-    windows: List[WalkForwardWindow] = []
-    step = pd.DateOffset(years=1)
     train_span = pd.DateOffset(years=train_years)
     test_span = pd.DateOffset(years=test_years)
 
-    current_start = earliest
+    first_train_end = (earliest + train_span) - pd.Timedelta(days=1)
+    if first_train_end >= latest:
+        raise ValueError(
+            "Not enough intraday history to satisfy the minimum training span "
+            f"({train_years}y) before the first evaluation window."
+        )
+
+    windows: List[WalkForwardWindow] = []
+
+    train_start = earliest
+    train_end = first_train_end
 
     while True:
-        train_start = current_start.normalize()
-        train_end = (train_start + train_span) - pd.Timedelta(days=1)
-
-        if train_end > latest:
-            break
-
         test_start = train_end + pd.Timedelta(days=1)
         if test_start > latest:
             break
 
-        test_end_candidate = (test_start + test_span) - pd.Timedelta(days=1)
-        test_end = min(test_end_candidate, latest)
+        desired_test_end = (test_start + test_span) - pd.Timedelta(days=1)
+        if desired_test_end > latest:
+            if not allow_partial_final:
+                _LOGGER.info(
+                    "Skipping partial walk-forward window for %s; not enough data "
+                    "for a %s-year evaluation span.",
+                    symbol,
+                    test_years,
+                )
+                break
+            _LOGGER.warning(
+                "Truncating final walk-forward window for %s to available data (%s → %s).",
+                symbol,
+                test_start.date(),
+                latest.date(),
+            )
+            test_end = latest
+        else:
+            test_end = desired_test_end
+
+        if test_end <= train_end:
+            break
 
         windows.append(
             WalkForwardWindow(
@@ -139,7 +183,7 @@ def generate_walk_forward_windows(
         if test_end >= latest:
             break
 
-        current_start = current_start + step
+        train_end = test_end
 
     return windows
 
@@ -156,6 +200,7 @@ def run_walk_forward_evaluation(
     test_years: int = 1,
     benchmark_symbol: Optional[str] = None,
     verbose: bool = True,
+    allow_partial_final: bool = True,
 ) -> Dict[str, Any]:
     """Execute walk-forward evaluation across the requested windows.
 
@@ -166,6 +211,13 @@ def run_walk_forward_evaluation(
         model_path: Optional direct filesystem path to a saved model.
         output_dir: Directory where JSON evaluation artifacts should be written.
         deterministic: Use deterministic actions when calling ``model.predict``.
+        auto_generate: Derive walk-forward windows automatically when ``windows`` is ``None``.
+        train_years: Minimum span (years) for the initial training window.
+        test_years: Nominal span (years) for each evaluation window.
+        benchmark_symbol: Override benchmark symbol (defaults to config/heuristic).
+        verbose: Emit per-window summaries during evaluation.
+        allow_partial_final: Allow the final evaluation window to shrink to remaining data
+            instead of being discarded when insufficient history exists.
 
     Returns:
         Summary dictionary containing per-window evaluation results and metadata.
@@ -174,9 +226,13 @@ def run_walk_forward_evaluation(
     cfg = _coerce_training_config(config)
 
     model, metadata = _load_model(model_id=model_id, model_path=model_path)
-    agent_type = metadata.get("agent_type", cfg.agent_type).upper()
+    raw_agent_type = metadata.get("agent_type", cfg.agent_type)
+    agent_type = _normalize_agent_type(raw_agent_type)
     if agent_type != "SAC":
-        raise ValueError(f"Walk-forward evaluation currently supports SAC agents only (got {agent_type})")
+        raise ValueError(
+            "Walk-forward evaluation currently supports SAC agents only "
+            f"(got {raw_agent_type})"
+        )
 
     symbol = metadata.get("symbol", cfg.symbol).upper()
     training_settings = _resolve_training_settings(cfg, metadata)
@@ -197,6 +253,7 @@ def run_walk_forward_evaluation(
             interval=interval,
             train_years=train_years,
             test_years=test_years,
+            allow_partial_final=allow_partial_final,
         )
     else:
         parsed_windows = [_coerce_window(window) for window in windows]
@@ -216,6 +273,7 @@ def run_walk_forward_evaluation(
     window_results: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     commission_config = resolve_commission_config(training_settings)
+    slippage_config = resolve_slippage_config(training_settings)
 
     for window in parsed_windows:
         try:
@@ -233,6 +291,7 @@ def run_walk_forward_evaluation(
                 output_path=output_path,
                 metadata=metadata,
                 commission_config=commission_config,
+                slippage_config=slippage_config,
             )
             window_results.append(window_result)
 
@@ -261,13 +320,13 @@ def run_walk_forward_evaluation(
     return {
         "status": status,
         "symbol": symbol,
-        "agent_type": agent_type,
+    "agent_type": raw_agent_type,
         "model_id": metadata.get("model_id", model_id),
         "windows_evaluated": len(window_results),
         "windows_failed": len(errors),
         "results": window_results,
         "errors": errors,
-    "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -281,8 +340,25 @@ def run_walk_forward_training_pipeline(
     test_years: int = 1,
     benchmark_symbol: Optional[str] = None,
     verbose: bool = True,
+    allow_partial_final: bool = True,
 ) -> Dict[str, Any]:
-    """Train and evaluate SAC models sequentially across walk-forward windows."""
+    """Train and evaluate SAC models sequentially across walk-forward windows.
+
+    Args:
+        base_config: Seed training configuration for the walk-forward runs.
+        windows: Optional explicit window definitions to use.
+        output_dir: Directory where evaluation artifacts are stored.
+        deterministic: Use deterministic actions for evaluation rollouts.
+        auto_generate: Generate walk-forward windows automatically when ``windows`` is ``None``.
+        train_years: Minimum span (years) for the initial training period.
+        test_years: Nominal span (years) for each evaluation block.
+        benchmark_symbol: Override benchmark symbol (defaults to config/heuristic).
+        verbose: Emit logging information about window selection and run progress.
+        allow_partial_final: Allow the final evaluation window to shrink to available data.
+
+    Returns:
+        Summary payload describing the training/evaluation runs.
+    """
 
     cfg = _coerce_training_config(base_config)
     symbol = cfg.symbol.upper()
@@ -304,12 +380,29 @@ def run_walk_forward_training_pipeline(
             interval=interval,
             train_years=train_years,
             test_years=test_years,
+            allow_partial_final=allow_partial_final,
         )
     else:
         windows_obj = [_coerce_window(window) for window in windows]
 
     if not windows_obj:
         raise ValueError("No walk-forward windows available for training pipeline")
+
+    if verbose:
+        print(f"[STAGE OK] Window setup complete ({len(windows_obj)} window(s))")
+        for idx, window in enumerate(windows_obj, start=1):
+            train_days = (window.train_end - window.train_start).days + 1
+            test_days = (window.test_end - window.test_start).days + 1
+            _LOGGER.info(
+                "[WALK-FORWARD][WINDOW %s] Train %s→%s (%s days) | Test %s→%s (%s days)",
+                idx,
+                window.train_start.date(),
+                window.train_end.date(),
+                train_days,
+                window.test_start.date(),
+                window.test_end.date(),
+                test_days,
+            )
 
     runs: List[Dict[str, Any]] = []
 
@@ -337,6 +430,7 @@ def run_walk_forward_training_pipeline(
                 f" Train {window.train_start.date()}->{window.train_end.date()}"
                 f" | Symbol {symbol} | Benchmark {resolved_benchmark}"
             )
+            print(f"[STAGE] Training start ({index}/{len(windows_obj)})")
 
         train_result = train_agent(window_config)
 
@@ -348,8 +442,12 @@ def run_walk_forward_training_pipeline(
         if train_result.get("status") != "success":
             runs.append(run_entry)
             if verbose:
+                print(f"[STAGE FAIL] Training failed ({index}/{len(windows_obj)})")
                 print("[WALK-FORWARD][TRAIN] Training failed, skipping evaluation for this window.")
             continue
+
+        if verbose:
+            print(f"[STAGE OK] Training complete ({index}/{len(windows_obj)})")
 
         metadata = train_result.get("metadata", {})
         train_metrics = {
@@ -367,16 +465,27 @@ def run_walk_forward_training_pipeline(
                 f" | Model: {train_result.get('model_path')}"
             )
 
-        evaluation = run_walk_forward_evaluation(
-            config=window_config,
-            windows=[window],
-            model_path=train_result.get("model_path"),
-            output_dir=output_dir,
-            deterministic=deterministic,
-            auto_generate=False,
-            benchmark_symbol=resolved_benchmark,
-            verbose=verbose,
-        )
+        if verbose:
+            print(f"[STAGE] Evaluation start ({index}/{len(windows_obj)})")
+
+        try:
+            evaluation = run_walk_forward_evaluation(
+                config=window_config,
+                windows=[window],
+                model_path=train_result.get("model_path"),
+                output_dir=output_dir,
+                deterministic=deterministic,
+                auto_generate=False,
+                benchmark_symbol=resolved_benchmark,
+                verbose=verbose,
+            )
+        except Exception:
+            if verbose:
+                print(f"[STAGE FAIL] Evaluation error ({index}/{len(windows_obj)})")
+            raise
+
+        if verbose:
+            print(f"[STAGE OK] Evaluation complete ({index}/{len(windows_obj)})")
 
         run_entry["evaluation_result"] = evaluation
         runs.append(run_entry)
@@ -396,7 +505,7 @@ def run_walk_forward_training_pipeline(
         "benchmark": resolved_benchmark,
         "interval": interval,
         "runs": runs,
-    "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -414,6 +523,7 @@ def _evaluate_single_window(
     output_path: Path,
     metadata: Dict[str, Any],
     commission_config: Dict[str, float],
+    slippage_config: Dict[str, float],
 ) -> Dict[str, Any]:
     test_df = _prepare_intraday_dataframe(
         symbol=symbol,
@@ -423,6 +533,9 @@ def _evaluate_single_window(
     )
 
     sampler = IntradaySessionSampler(shuffle=False, sequential=True)
+    forced_exit_minutes = getattr(training_settings, "forced_exit_minutes", 375.0)
+    forced_exit_tolerance = getattr(training_settings, "forced_exit_tolerance", 1.0)
+    forced_exit_column = getattr(training_settings, "forced_exit_column", None)
     base_env = IntradayEquityEnv(
         df=test_df,
         initial_capital=training_settings.initial_capital,
@@ -431,6 +544,10 @@ def _evaluate_single_window(
         normalize_obs=training_settings.normalize_obs,
         history_config=history_config,
         sampler=sampler,
+        slippage_config=slippage_config,
+        forced_exit_minutes=forced_exit_minutes,
+        forced_exit_tolerance=forced_exit_tolerance,
+        forced_exit_column=forced_exit_column,
     )
 
     env: gym.Env = ContinuousActionAdapter(base_env)
@@ -472,8 +589,14 @@ def _evaluate_single_window(
             "min_fee": float(commission_config.get("min_fee", 0.0)),
             "max_pct": float(commission_config.get("max_pct", 0.0)),
         },
+        "slippage": {
+            "buy_bps": float(slippage_config.get("buy_bps", 0.0)),
+            "sell_bps": float(slippage_config.get("sell_bps", 0.0)),
+            "buy_per_share": float(slippage_config.get("buy_per_share", 0.0)),
+            "sell_per_share": float(slippage_config.get("sell_per_share", 0.0)),
+        },
         "reward_mode": reward_mode,
-    "created_at": datetime.now(UTC).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
     file_stub = window.filename_stub(symbol)
@@ -644,6 +767,13 @@ def _features_payload(cfg: TrainingConfig) -> Dict[str, Any]:
     return {}
 
 
+def _normalize_agent_type(agent_type: Any) -> str:
+    if agent_type is None:
+        return ""
+    normalized = str(agent_type).upper()
+    return _AGENT_TYPE_ALIASES.get(normalized, normalized)
+
+
 def _load_model(
     model_id: Optional[str],
     model_path: Optional[str],
@@ -685,3 +815,47 @@ def _coerce_window(window: Union[WalkForwardWindow, Dict[str, Any]]) -> WalkForw
             raise ValueError(f"Walk-forward window missing keys: {sorted(missing)}")
         return WalkForwardWindow(**window)
     raise TypeError("walk-forward window must be a WalkForwardWindow or dict payload")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Walk-forward utilities")
+    parser.add_argument("symbol", help="Primary symbol for intraday data (e.g., TQQQ)")
+    parser.add_argument("--benchmark", help="Override benchmark symbol", default=None)
+    parser.add_argument("--interval", default="15m", help="Data interval (default: 15m)")
+    parser.add_argument("--train-years", type=int, default=2, help="Seed training span in years")
+    parser.add_argument("--test-years", type=int, default=1, help="Evaluation span in years")
+    parser.add_argument(
+        "--no-partial-final",
+        dest="allow_partial",
+        action="store_false",
+        help="Disallow truncated final evaluation window",
+    )
+
+    args = parser.parse_args()
+
+    try:
+        windows = generate_walk_forward_windows(
+            symbol=args.symbol,
+            benchmark_symbol=args.benchmark,
+            interval=args.interval,
+            train_years=args.train_years,
+            test_years=args.test_years,
+            allow_partial_final=args.allow_partial,
+        )
+    except Exception as exc:  # pragma: no cover - CLI convenience
+        parser.error(str(exc))
+
+    if not windows:
+        print("No walk-forward windows generated.")
+    else:
+        print(f"Resolved {len(windows)} walk-forward windows:")
+        for idx, window in enumerate(windows, start=1):
+            train_days = (window.train_end - window.train_start).days + 1
+            test_days = (window.test_end - window.test_start).days + 1
+            print(
+                f"[{idx}] Train {window.train_start.date()} → {window.train_end.date()}"
+                f" ({train_days} days) | Test {window.test_start.date()} → {window.test_end.date()}"
+                f" ({test_days} days)"
+            )

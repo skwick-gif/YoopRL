@@ -38,7 +38,11 @@ import json
 from copy import deepcopy
 
 from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
-from training.commission import IBKR_DEFAULT_COMMISSION
+from training.commission import (
+    DEFAULT_SLIPPAGE_CONFIG,
+    IBKR_DEFAULT_COMMISSION,
+    resolve_slippage_config,
+)
 
 
 @dataclass
@@ -300,6 +304,9 @@ class TrainingSettings:
     commission_model: str = 'ibkr_tiered_us_equities'
     commission_min_fee: float = 2.5
     commission_max_pct: float = 0.01
+    slippage: Union[Dict[str, Any], float, None] = field(
+        default_factory=lambda: deepcopy(DEFAULT_SLIPPAGE_CONFIG)
+    )
     initial_capital: float = 100000.0
     max_position_size: float = 1.0
     optuna_trials: int = 100
@@ -313,8 +320,12 @@ class TrainingSettings:
     benchmark_interval: Optional[str] = None
     reward_mode: Optional[str] = None
     train_split: float = 0.8
+    random_seed: Optional[int] = None
     dsr_config: Dict[str, Any] = field(default_factory=dict)
     intraday_enabled: bool = False
+    forced_exit_minutes: Optional[float] = 375.0
+    forced_exit_tolerance: float = 1.0
+    forced_exit_column: Optional[str] = None
     
     def validate(self) -> List[str]:
         """Validate training settings."""
@@ -353,6 +364,20 @@ class TrainingSettings:
         if self.commission_max_pct <= 0 or self.commission_max_pct > 0.05:
             errors.append("commission_max_pct must be in (0, 0.05]")
         
+        try:
+            slippage_config = resolve_slippage_config(self)
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(f"Invalid slippage configuration: {exc}")
+            slippage_config = deepcopy(DEFAULT_SLIPPAGE_CONFIG)
+
+        for key in ("buy_bps", "sell_bps"):
+            if slippage_config.get(key, 0.0) > 2000:
+                errors.append("Slippage basis points must be <= 2000 (20%)")
+
+        for key in ("buy_per_share", "sell_per_share"):
+            if slippage_config.get(key, 0.0) > 10.0:
+                errors.append("Slippage per share must be <= $10.00")
+
         if self.initial_capital <= 0:
             errors.append("Initial capital must be positive")
         
@@ -392,6 +417,32 @@ class TrainingSettings:
             errors.append("intraday_enabled requires interval='15m'")
         if intraday_flag and frequency not in {'intraday', '15m', '15min'}:
             errors.append("intraday_enabled requires data_frequency set to an intraday value")
+
+        if self.forced_exit_minutes is not None:
+            try:
+                minutes_value = float(self.forced_exit_minutes)
+            except (TypeError, ValueError):
+                errors.append("forced_exit_minutes must be numeric when provided")
+            else:
+                if minutes_value < 0 or minutes_value > 480:
+                    errors.append("forced_exit_minutes must be between 0 and 480")
+
+        if self.forced_exit_tolerance < 0 or self.forced_exit_tolerance > 30:
+            errors.append("forced_exit_tolerance must be between 0 and 30 minutes")
+
+        if self.forced_exit_column is not None and not isinstance(self.forced_exit_column, str):
+            errors.append("forced_exit_column must be a string when provided")
+
+        if self.random_seed not in (None, ""):
+            try:
+                seed_value = int(self.random_seed)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                errors.append("random_seed must be an integer when provided")
+            else:
+                if seed_value < 0:
+                    errors.append("random_seed must be non-negative")
+                else:
+                    self.random_seed = seed_value
         
         return errors
 
@@ -419,15 +470,15 @@ class TrainingConfig:
         elif canonical_agent == 'SAC' and self.sac_hyperparameters is None:
             if self.agent_type == 'SAC_INTRADAY_DSR':
                 self.sac_hyperparameters = SACHyperparameters(
-                    learning_rate=0.0001,
+                    learning_rate=5e-5,
                     buffer_size=200_000,
                     batch_size=256,
                     tau=0.005,
                     gamma=0.99,
-                    ent_coef='auto',
-                    target_entropy='auto',
-                    vol_penalty=-0.0,
-                    episodes=250_000,
+                    ent_coef=0.2,
+                    target_entropy=-0.5,
+                    vol_penalty=0.0,
+                    episodes=100_000,
                 )
             else:
                 self.sac_hyperparameters = SACHyperparameters()
@@ -454,6 +505,12 @@ class TrainingConfig:
             if self.training_settings.optuna_trials < 1:
                 self.training_settings.optuna_trials = 0
             self.training_settings.intraday_enabled = True
+            if not self.training_settings.total_timesteps:
+                self.training_settings.total_timesteps = 200_000
+            if not self.training_settings.max_total_timesteps or self.training_settings.max_total_timesteps > 200_000:
+                self.training_settings.max_total_timesteps = 200_000
+            if not self.training_settings.episode_budget:
+                self.training_settings.episode_budget = 5_000
         else:
             self.training_settings.intraday_enabled = bool(self.training_settings.intraday_enabled)
 
