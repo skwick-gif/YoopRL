@@ -1,0 +1,57 @@
+{
+  "agent_type": "SAC_INTRADAY_DSR",
+  "symbol": "TNA",
+  "training_settings": {
+    "start_date": "2024-07-01",
+    "end_date": "2024-09-30",
+    "commission": {
+      "per_share": 0.0035,
+      "min_fee": 1.0,
+      "max_pct": 0.01
+    },
+    "commission_model": "ibkr_tiered_us_equities",
+    "commission_min_fee": 1.0,
+    "commission_max_pct": 0.01,
+    "slippage": {
+      "buy_bps": 5.0,
+      "sell_bps": 5.0,
+      "buy_per_share": 0.005,
+      "sell_per_share": 0.005
+    },
+    "initial_capital": 50000.0,
+    "max_position_size": 1.0,
+    "optuna_trials": 0,
+    "normalize_obs": true,
+    "total_timesteps": 3000,
+    "max_total_timesteps": 3000,
+    "episode_budget": 30,
+    "data_frequency": "intraday",
+    "interval": "15m",
+    "benchmark_symbol": "IWM",
+    "benchmark_interval": "15m",
+    "reward_mode": "dsr",
+    "train_split": 0.8,
+    "random_seed": 42,
+    "dsr_config": {
+      "decay": 0.94,
+      "epsilon": 1e-09,
+      "warmup_steps": 200,
+      "clip_value": 6.0
+    },
+    "intraday_enabled": true,
+    "forced_exit_minutes": 375.0,
+    "forced_exit_tolerance": 2.0,
+    "forced_exit_column": null
+  },
+  "sac_hyperparameters": {
+    "learning_rate": 0.0002,
+    "buffer_size": 50000,
+    "batch_size": 128,
+    "tau": 0.005,
+    "gamma": 0.99,
+    "ent_coef": 0.2,
+    "target_entropy": -0.5,
+    "vol_penalty": 0.0,
+    "episodes": 30
+  }
+}

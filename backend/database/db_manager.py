@@ -16,12 +16,16 @@ SQLite is used for:
 - Easy backup: Just copy the .db file
 """
 
+from __future__ import annotations
+
 import sqlite3
 import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import json
+
+from backend.utils.paths import default_database_path
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +38,11 @@ class DatabaseManager:
     Thread-safe: Uses connection pooling for concurrent reads
     """
     
-    def __init__(self, db_path: str = "d:/YoopRL/data/trading.db", retention_days: int = 365):
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        retention_days: int = 365,
+    ):
         """
         Initialize database manager
         
@@ -42,16 +50,16 @@ class DatabaseManager:
             db_path: Path to SQLite database file
             retention_days: How many days of data to keep (default: 365 = 1 year)
         """
-        self.db_path = db_path
+        self.db_path = Path(db_path) if db_path else default_database_path()
         self.retention_days = retention_days
         
         # Create data directory if it doesn't exist
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Initialize database schema
         self._init_schema()
         
-        logger.info(f"Database initialized at {db_path} with {retention_days} days retention")
+        logger.info("Database initialized at %s with %s days retention", self.db_path, retention_days)
     
     def _get_connection(self) -> sqlite3.Connection:
         """
@@ -61,7 +69,7 @@ class DatabaseManager:
         - Row factory for dict-like access
         - WAL mode for better concurrency
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row  # Access columns by name
         conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
         return conn

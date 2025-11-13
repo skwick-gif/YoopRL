@@ -41,6 +41,7 @@ from execution import agent_manager as live_agent_manager
 from monitoring.routes import register_monitoring_routes
 from api.live_routes import register_live_routes
 from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
+from backend.utils.paths import ensure_data_subdir
 
 # Setup logging
 logging.basicConfig(
@@ -439,7 +440,7 @@ def download_training_data():
         )
         
         # Save to disk
-        output_dir = Path("d:/YoopRL/data/training")
+        output_dir = ensure_data_subdir("training")
         files = save_prepared_data(prepared, split, output_dir, symbol)
         
         logger.info(f"Training data prepared successfully for {symbol}")

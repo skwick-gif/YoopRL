@@ -1,0 +1,149 @@
+agent: SAC_DSR
+description: "15-minute intraday RL agent for leveraged ETFs (TNA, UPRO, TQQQ)"
+version: 1.0.0
+
+environment:
+  timeframe: 15m
+  assets: ["TNA", "UPRO", "TQQQ"]
+  state_stack: 20
+  features:
+    - log_return
+    - range_percent
+    - volume_zscore
+    - vwap_distance
+    - rsi_14
+    - atr_ratio
+    - realized_vol
+    - spread_bid_ask
+    - order_imbalance
+  context_inputs:
+    - daily_bias
+    - confidence
+    - volatility_tag
+  normalize: ema
+  clip_sigma: 5
+  trading_hours: "09:30-16:00"
+  timezone: "America/New_York"
+
+network:
+  encoder:
+    type: mlp
+    layers: [256, 256]
+    activation: relu
+  actor:
+    activation: tanh
+  critics: 2
+  mixed_precision: true
+  layer_norm: false
+
+hyperparameters_common:
+  tau: 0.01
+  replay_size: 5000000
+  target_entropy: -1.0
+  alpha_auto: true
+  polyak_update: 0.995
+
+assets:
+  TNA:
+    gamma: 0.995
+    lr: 0.0002
+    batch_size: 768
+    dsr_weight: 0.35
+    volatility_clip:
+      high: 0.4
+      medium: 0.7
+      low: 1.0
+    reward:
+      formula: >
+        R = ΔPnL_15m
+            - 0.06 * abs(Δposition)
+            - 0.05 * slippage_cost
+            - 0.30 * drawdown_intraday
+            - 0.02 * position_flip
+      parameters:
+        position_penalty: 0.06
+        slippage_penalty: 0.05
+        drawdown_penalty: 0.30
+        flip_penalty: 0.02
+  UPRO:
+    gamma: 0.998
+    lr: 0.0003
+    batch_size: 512
+    dsr_weight: 0.25
+    volatility_clip:
+      high: 0.5
+      medium: 0.8
+      low: 1.0
+    reward:
+      formula: >
+        R = ΔPnL_15m
+            - 0.05 * abs(Δposition)
+            - 0.03 * slippage_cost
+            - 0.25 * drawdown_intraday
+            - 0.01 * position_flip
+      parameters:
+        position_penalty: 0.05
+        slippage_penalty: 0.03
+        drawdown_penalty: 0.25
+        flip_penalty: 0.01
+  TQQQ:
+    gamma: 0.999
+    lr: 0.0003
+    batch_size: 512
+    dsr_weight: 0.30
+    volatility_clip:
+      high: 0.45
+      medium: 0.75
+      low: 1.0
+    reward:
+      formula: >
+        R = ΔPnL_15m
+            - 0.05 * abs(Δposition)
+            - 0.04 * slippage_cost
+            - 0.28 * drawdown_intraday
+            - 0.015 * position_flip
+      parameters:
+        position_penalty: 0.05
+        slippage_penalty: 0.04
+        drawdown_penalty: 0.28
+        flip_penalty: 0.015
+
+actions:
+  type: continuous
+  range: [-1.0, 1.0]
+  smoothing:
+    enabled: true
+    decay: 0.8
+    noise_std: 0.01
+
+training:
+  update_to_data_ratio: 1.5
+  amp: true
+  gradient_accumulation: false
+  max_epochs: 500
+  evaluation_interval: 50
+  checkpoint_interval: 5
+
+execution:
+  trade_latency_tolerance_ms: 200
+  max_position_size: 1.0
+  stop_loss_intraday: 0.05
+  take_profit_intraday: 0.08
+  max_daily_drawdown: 0.07
+  cooldown_after_stop: 3  # bars to skip after stop triggered
+
+logging:
+  metrics:
+    - sharpe
+    - sortino
+    - calmar
+    - hit_rate
+    - turnover
+    - max_drawdown
+    - profit_factor
+    - avg_trade_duration
+  checkpoint_interval: 5
+  seed: 42
+  output_dir: "./logs/production/"
+  console_log: true
+  save_model_every: 25

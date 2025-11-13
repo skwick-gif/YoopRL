@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import pandas as pd
+
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:  # pragma: no cover - CLI convenience
     sys.path.append(str(ROOT_DIR))
@@ -111,6 +113,20 @@ def run_walk_forward_cli(args: argparse.Namespace) -> None:
         windows = _load_windows_from_file(args.windows)
         auto_generate = False
     else:
+        min_train_start = None
+        if base_config.training_settings.start_date:
+            try:
+                min_train_start = pd.Timestamp(base_config.training_settings.start_date)
+            except Exception:  # pragma: no cover - ignore invalid values
+                min_train_start = None
+
+        max_test_end = None
+        if base_config.training_settings.end_date:
+            try:
+                max_test_end = pd.Timestamp(base_config.training_settings.end_date)
+            except Exception:  # pragma: no cover
+                max_test_end = None
+
         windows = generate_walk_forward_windows(
             symbol=symbol,
             benchmark_symbol=args.benchmark,
@@ -118,6 +134,8 @@ def run_walk_forward_cli(args: argparse.Namespace) -> None:
             train_years=args.train_years,
             test_years=args.test_years,
             allow_partial_final=args.allow_partial_final,
+            min_train_start=min_train_start,
+            max_test_end=max_test_end,
         )
         auto_generate = True
 

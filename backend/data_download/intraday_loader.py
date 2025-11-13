@@ -308,13 +308,23 @@ def load_intraday_data(
     expected_session_set = set(expected_sessions)
 
     data_from_sql = False
+    sql_df = pd.DataFrame()
     if not force_download:
         start_ts = pd.Timestamp(start_date).tz_localize(NY_TZ).isoformat()
         end_ts = (pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(minutes=1)).tz_localize(NY_TZ).isoformat()
         sql_df = db_manager.get_intraday_data(symbol, interval=interval, start=start_ts, end=end_ts)
         if not sql_df.empty:
-            data = sql_df.copy()
-            data_from_sql = True
+            available_sessions = set(pd.to_datetime(sql_df["session_date"]).dt.date)
+            missing_sessions = expected_session_set - available_sessions
+            if missing_sessions:
+                _LOGGER.info(
+                    "Intraday DB missing %d sessions for %s; reloading from cache",
+                    len(missing_sessions),
+                    symbol,
+                )
+            else:
+                data = sql_df.copy()
+                data_from_sql = True
 
     if not data_from_sql and (force_download or not cached_sessions.issuperset(expected_session_set)):
         download_and_cache_sessions(symbol, start_date, end_date, interval=interval)

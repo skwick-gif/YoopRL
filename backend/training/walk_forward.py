@@ -106,6 +106,8 @@ def generate_walk_forward_windows(
     test_years: int = 1,
     *,
     allow_partial_final: bool = True,
+    min_train_start: Optional[pd.Timestamp] = None,
+    max_test_end: Optional[pd.Timestamp] = None,
 ) -> List[WalkForwardWindow]:
     """Construct cumulative walk-forward windows using available intraday data bounds.
 
@@ -122,6 +124,12 @@ def generate_walk_forward_windows(
 
     earliest = max(primary_bounds[0], benchmark_bounds[0]).normalize()
     latest = min(primary_bounds[1], benchmark_bounds[1]).normalize()
+
+    if min_train_start is not None:
+        earliest = max(earliest, min_train_start.normalize())
+
+    if max_test_end is not None:
+        latest = min(latest, max_test_end.normalize())
 
     if earliest >= latest:
         raise ValueError(
@@ -247,6 +255,20 @@ def run_walk_forward_evaluation(
     if not windows:
         if not auto_generate:
             raise ValueError("Walk-forward windows must be provided when auto_generate is False")
+        min_train_start = None
+        if training_settings.start_date:
+            try:
+                min_train_start = pd.Timestamp(training_settings.start_date)
+            except Exception:  # pragma: no cover
+                min_train_start = None
+
+        max_test_end = None
+        if training_settings.end_date:
+            try:
+                max_test_end = pd.Timestamp(training_settings.end_date)
+            except Exception:  # pragma: no cover
+                max_test_end = None
+
         parsed_windows = generate_walk_forward_windows(
             symbol=symbol,
             benchmark_symbol=resolved_benchmark,
@@ -254,6 +276,8 @@ def run_walk_forward_evaluation(
             train_years=train_years,
             test_years=test_years,
             allow_partial_final=allow_partial_final,
+            min_train_start=min_train_start,
+            max_test_end=max_test_end,
         )
     else:
         parsed_windows = [_coerce_window(window) for window in windows]
@@ -374,6 +398,20 @@ def run_walk_forward_training_pipeline(
     if windows is None:
         if not auto_generate:
             raise ValueError("Walk-forward windows must be provided when auto_generate is False")
+        min_train_start = None
+        if base_settings.start_date:
+            try:
+                min_train_start = pd.Timestamp(base_settings.start_date)
+            except Exception:  # pragma: no cover - ignore malformed values
+                min_train_start = None
+
+        max_test_end = None
+        if base_settings.end_date:
+            try:
+                max_test_end = pd.Timestamp(base_settings.end_date)
+            except Exception:  # pragma: no cover
+                max_test_end = None
+
         windows_obj = generate_walk_forward_windows(
             symbol=symbol,
             benchmark_symbol=resolved_benchmark,
@@ -381,6 +419,8 @@ def run_walk_forward_training_pipeline(
             train_years=train_years,
             test_years=test_years,
             allow_partial_final=allow_partial_final,
+            min_train_start=min_train_start,
+            max_test_end=max_test_end,
         )
     else:
         windows_obj = [_coerce_window(window) for window in windows]

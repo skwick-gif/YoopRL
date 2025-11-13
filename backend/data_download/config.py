@@ -9,6 +9,8 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 
+from backend.utils.paths import ensure_data_subdir
+
 # Load environment variables from .env file
 # טוען משתני סביבה מקובץ .env
 load_dotenv()
@@ -29,7 +31,7 @@ class DownloadConfig:
     train_test_split: float = 0.8
     
     # Cache directory for downloaded data
-    cache_dir: Path = field(default_factory=lambda: Path("d:/YoopRL/data/cache"))
+    cache_dir: Path = field(default_factory=lambda: ensure_data_subdir("cache"))
 
 
 @dataclass
@@ -126,7 +128,7 @@ class TrainingDataConfig:
     api_keys: APIKeysConfig = field(default_factory=APIKeysConfig)
     
     # Output directory for prepared data
-    output_dir: Path = field(default_factory=lambda: Path("d:/YoopRL/data/training"))
+    output_dir: Path = field(default_factory=lambda: ensure_data_subdir("training"))
     
     def __post_init__(self):
         """Create necessary directories"""

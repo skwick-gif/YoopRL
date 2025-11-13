@@ -10,9 +10,11 @@ from typing import Tuple
 
 import requests
 
+from backend.utils.paths import default_database_path
+
 DEFAULT_BRIDGE_URL = "http://localhost:5080"
 DEFAULT_BACKEND_URL = "http://localhost:8000"
-DEFAULT_DB_PATH = Path("d:/YoopRL/data/trading.db")
+DEFAULT_DB_PATH = default_database_path()
 
 
 def check_bridge(base_url: str) -> Tuple[bool, str]:
