@@ -1,0 +1,21 @@
+{
+  "status": "failed",
+  "symbol": "TNA",
+  "benchmark": "IWM",
+  "interval": "15m",
+  "runs": [
+    {
+      "window": {
+        "train_start": "2020-02-10",
+        "train_end": "2022-02-09",
+        "test_start": "2022-02-10",
+        "test_end": "2023-02-09"
+      },
+      "train_result": {
+        "status": "failed",
+        "error": "Numpy is not available"
+      }
+    }
+  ],
+  "created_at": "2025-11-13T20:04:47.386933+00:00"
+}

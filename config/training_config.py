@@ -37,8 +37,8 @@ from datetime import datetime, UTC
 import json
 from copy import deepcopy
 
-from backend.data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
-from backend.training.commission import (
+from data_download.intraday_loader import ALLOWED_INTRADAY_SYMBOLS
+from training.commission import (
     DEFAULT_SLIPPAGE_CONFIG,
     IBKR_DEFAULT_COMMISSION,
     resolve_slippage_config,

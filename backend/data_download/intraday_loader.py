@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import pytz
@@ -34,6 +36,56 @@ ALLOWED_INTRADAY_SYMBOLS = frozenset({
 })
 
 _LOGGER = logging.getLogger(__name__)
+_CACHE_MAX_ENTRIES = 6
+_intraday_data_cache: "OrderedDict[str, pd.DataFrame]" = OrderedDict()
+
+
+def _normalize_cache_bound(value: date | datetime) -> str:
+    return pd.Timestamp(value).normalize().date().isoformat()
+
+
+def _intraday_cache_key(
+    symbol: str,
+    interval: str,
+    start_date: date,
+    end_date: date,
+) -> str:
+    return "|".join((symbol.upper(), interval, _normalize_cache_bound(start_date), _normalize_cache_bound(end_date)))
+
+
+def _get_cached_intraday_frame(cache_key: str) -> Optional[pd.DataFrame]:
+    cached = _intraday_data_cache.get(cache_key)
+    if cached is None:
+        return None
+    _intraday_data_cache.move_to_end(cache_key)
+    return cached.copy()
+
+
+def _set_cached_intraday_frame(cache_key: str, data: pd.DataFrame) -> None:
+    if cache_key in _intraday_data_cache:
+        _intraday_data_cache.move_to_end(cache_key)
+    _intraday_data_cache[cache_key] = data.copy()
+    while len(_intraday_data_cache) > _CACHE_MAX_ENTRIES:
+        _intraday_data_cache.popitem(last=False)
+
+
+def clear_intraday_cache(symbol: Optional[str] = None, interval: Optional[str] = None) -> None:
+    if symbol is None and interval is None:
+        _intraday_data_cache.clear()
+        return
+
+    to_remove = []
+    symbol_key = symbol.upper() if symbol else None
+    for key in _intraday_data_cache.keys():
+        parts = key.split("|")
+        if len(parts) != 4:
+            continue
+        matches_symbol = symbol_key is None or parts[0] == symbol_key
+        matches_interval = interval is None or parts[1] == interval
+        if matches_symbol and matches_interval:
+            to_remove.append(key)
+    for key in to_remove:
+        _intraday_data_cache.pop(key, None)
 _TWELVE_DATA_BASE_URL = "https://api.twelvedata.com/time_series"
 _INTERVAL_ALIASES = {
     "15m": "15min",
@@ -226,17 +278,28 @@ def download_and_cache_sessions(
 METADATA_COLUMNS = {'session_date', 'bar_index', 'time_fraction', 'minutes_from_open', 'is_session_end'}
 
 
+@lru_cache(maxsize=1024)
+def _read_session_csv(path_str: str) -> pd.DataFrame:
+    path = Path(path_str)
+    df = pd.read_csv(path, index_col=0, parse_dates=True)
+    idx = pd.DatetimeIndex(df.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(NY_TZ)
+    else:
+        idx = idx.tz_convert(NY_TZ)
+    df.index = idx
+    df['session_date'] = df.index.date
+    return df
+
+
+def clear_session_cache() -> None:
+    _read_session_csv.cache_clear()
+
+
 def _load_sessions(paths: Iterable[Path]) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
     for path in sorted(paths):
-        df = pd.read_csv(path, index_col=0, parse_dates=True)
-        idx = pd.DatetimeIndex(df.index)
-        if idx.tz is None:
-            idx = idx.tz_localize(NY_TZ)
-        else:
-            idx = idx.tz_convert(NY_TZ)
-        df.index = idx
-        df['session_date'] = df.index.date
+        df = _read_session_csv(str(path)).copy()
         frames.append(df)
     if not frames:
         return pd.DataFrame()
@@ -304,6 +367,13 @@ def load_intraday_data(
     if start_date > end_date:
         raise ValueError("start_date must be earlier than end_date")
 
+    cache_key: Optional[str] = None
+    if not force_download:
+        cache_key = _intraday_cache_key(symbol, interval, start_date, end_date)
+        cached = _get_cached_intraday_frame(cache_key)
+        if cached is not None:
+            return cached
+
     expected_sessions = trading_sessions_between(start_date, end_date)
     expected_session_set = set(expected_sessions)
 
@@ -343,7 +413,87 @@ def load_intraday_data(
         _augment_intraday_metadata(data)
         db_manager.save_intraday_data(symbol, interval, data)
 
-    return data
+    if cache_key:
+        _set_cached_intraday_frame(cache_key, data)
+    return data.copy()
+
+
+def ensure_intraday_data_up_to(
+    symbols: Sequence[str],
+    interval: str = "15m",
+    end: Optional[str | date | datetime] = None,
+    *,
+    default_lookback_days: int = 30,
+) -> Dict[str, Tuple[date, date]]:
+    """Ensure each requested symbol has data through ``end`` (default: today).
+
+    For every symbol, determine the most recent session stored in SQLite, then
+    call ``load_intraday_data`` for the missing span so both the CSV cache and
+    database stay synchronized. Returns the normalized start/end dates fetched
+    per symbol for logging or validation.
+    """
+
+    if not symbols:
+        return {}
+
+    normalized_symbols = []
+    for symbol in symbols:
+        if not symbol:
+            continue
+        try:
+            normalized_symbols.append(_validate_intraday_symbol(symbol))
+        except ValueError:
+            _LOGGER.warning("Skipping unsupported intraday symbol '%s'", symbol)
+    if not normalized_symbols:
+        return {}
+
+    end_date = _parse_date(end) or date.today()
+    db_manager = DatabaseManager()
+    updated: Dict[str, Tuple[date, date]] = {}
+
+    for symbol in normalized_symbols:
+        bounds = db_manager.get_intraday_session_bounds(symbol, interval) or {}
+        max_date_raw = bounds.get("max_date")
+        if max_date_raw:
+            last_session = pd.Timestamp(max_date_raw).date()
+            start_date = last_session + timedelta(days=1)
+        else:
+            start_date = end_date - timedelta(days=default_lookback_days)
+
+        if start_date > end_date:
+            continue
+
+        try:
+            _LOGGER.info(
+                "Ensuring intraday data for %s (%s) %s -> %s",
+                symbol,
+                interval,
+                start_date,
+                end_date,
+            )
+            load_intraday_data(
+                symbol,
+                interval=interval,
+                start=start_date.isoformat(),
+                end=end_date.isoformat(),
+                force_download=False,
+            )
+            updated[symbol] = (start_date, end_date)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "No intraday data available" in message:
+                _LOGGER.info(
+                    "No new intraday sessions available for %s (%s) %s -> %s; skipping refresh.",
+                    symbol,
+                    interval,
+                    start_date,
+                    end_date,
+                )
+                continue
+            _LOGGER.error("Failed to refresh intraday data for %s: %s", symbol, exc)
+            raise
+
+    return updated
 
 
 def _augment_intraday_metadata(df: pd.DataFrame) -> None:

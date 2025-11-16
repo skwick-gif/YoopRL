@@ -1,0 +1,2 @@
+index,train_start,train_end,test_start,test_end,trades,sharpe_ratio,total_return,max_drawdown,train_sharpe,train_total_return,train_max_drawdown,passed,reasons
+1,2020-02-10,2022-02-09,2022-02-10,2023-02-09,0,0.0,0.0,0.0,-24.08,-0.04,-0.04,False,trades 0 < 25; sharpe 0.00 < 0.40

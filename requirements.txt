@@ -8,7 +8,8 @@ flask-cors==4.0.0
 # None needed - SQLite is included in Python standard library
 
 # Data Processing
-numpy>=1.26.0
+# Pin below NumPy 2 to stay compatible with the current PyTorch wheels
+numpy>=1.26.0,<2.0
 pandas>=2.1.0
 # scipy>=1.11.0  # Removed - using pure NumPy for drift detection (PSI)
 

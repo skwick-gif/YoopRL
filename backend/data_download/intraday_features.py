@@ -64,6 +64,8 @@ def add_intraday_features(df: pd.DataFrame, spec: IntradayFeatureSpec) -> pd.Dat
         if col not in data.columns:
             data[col] = 0.0
 
+    _stabilize_high_variance_features(data, primary_prefix, benchmark_prefix)
+
     return data.fillna(0.0)
 
 
@@ -114,3 +116,47 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int) -> Tupl
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-8)) * 100
     adx = _ema(dx, period)
     return plus_di.fillna(0.0), minus_di.fillna(0.0), adx.fillna(0.0)
+
+
+def _stabilize_high_variance_features(
+    data: pd.DataFrame,
+    primary_prefix: str,
+    benchmark_prefix: str,
+) -> None:
+    """Robustly scale noisy magnitude features before env normalization."""
+
+    targets = [
+        (f"{primary_prefix}_volume", True),
+        (f"{benchmark_prefix}_volume", True),
+        ("leveraged_volatility", False),
+    ]
+
+    for column, apply_log in targets:
+        if column not in data.columns:
+            continue
+        data[column] = _robust_rescale_feature(data[column], log_transform=apply_log)
+
+
+def _robust_rescale_feature(
+    series: pd.Series,
+    *,
+    log_transform: bool,
+    clip_sigma: float = 4.0,
+) -> pd.Series:
+    """Center, scale, then clip a feature to dampen extreme swings."""
+
+    values = pd.to_numeric(series, errors="coerce").fillna(0.0).astype(float)
+    arr = values.to_numpy(copy=True)
+    if log_transform:
+        arr = np.log1p(np.clip(arr, 0.0, None))
+
+    median = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - median)))
+    scale = 1.4826 * mad
+    if scale < 1e-6:
+        scale = 1.0
+
+    normalized = (arr - median) / scale
+    clipped = np.clip(normalized, -clip_sigma, clip_sigma)
+    rescaled = clipped / clip_sigma
+    return pd.Series(rescaled, index=series.index)

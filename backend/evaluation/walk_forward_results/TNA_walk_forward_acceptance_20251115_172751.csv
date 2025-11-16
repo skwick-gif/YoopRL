@@ -1,0 +1,5 @@
+index,train_start,train_end,test_start,test_end,trades,sharpe_ratio,total_return,max_drawdown,train_sharpe,train_total_return,train_max_drawdown,passed,reasons
+1,2020-02-10,2022-02-09,2022-02-10,2023-02-09,18,-7.68,-2.44,2.44,-24.08,-0.04,-0.04,True,trades 18 < 25; sharpe -7.68 < 0.40; grace window 1/2 bypass
+2,2020-02-10,2023-02-09,2023-02-10,2024-02-09,3768,-0.22,12.02,38.0,-0.1,0.16,-0.73,True,sharpe -0.22 < 0.40; max_dd 38.00 > 18.00; grace window 2/2 bypass
+3,2020-02-10,2024-02-09,2024-02-10,2025-02-09,26,-4.64,-3.17,3.32,-25.12,-0.04,-0.04,False,sharpe -4.64 < 0.40
+4,2020-02-10,2025-02-09,2025-02-10,2025-11-10,402,-0.66,-26.17,27.03,-5.72,-0.75,-0.75,False,sharpe -0.66 < 0.40; max_dd 27.03 > 18.00

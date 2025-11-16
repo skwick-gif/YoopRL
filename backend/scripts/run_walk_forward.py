@@ -14,6 +14,8 @@ import pandas as pd
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:  # pragma: no cover - CLI convenience
     sys.path.append(str(ROOT_DIR))
+if str(ROOT_DIR / 'backend') not in sys.path:  # pragma: no cover - CLI convenience
+    sys.path.append(str(ROOT_DIR / 'backend'))
 
 from config.training_config import TrainingConfig  # noqa: E402
 from training.walk_forward import (  # noqa: E402
@@ -98,6 +100,13 @@ def run_walk_forward_cli(args: argparse.Namespace) -> None:
 
     base_config = _load_training_config(args.config, symbol=symbol, agent_type=agent_type)
 
+    if args.optuna_trials is not None:
+        if args.optuna_trials < 0:
+            raise ValueError("--optuna-trials must be non-negative")
+        base_config.training_settings.optuna_trials = int(args.optuna_trials)
+        if args.optuna_trials > 0 and base_config.training_settings.optuna_validation_fraction <= 0.0:
+            base_config.training_settings.optuna_validation_fraction = 0.1
+
     if args.seed is not None:
         try:
             base_config.training_settings.random_seed = int(args.seed)
@@ -113,6 +122,12 @@ def run_walk_forward_cli(args: argparse.Namespace) -> None:
         windows = _load_windows_from_file(args.windows)
         auto_generate = False
     else:
+        ts = base_config.training_settings
+        if not (ts.start_date and ts.end_date):
+            raise ValueError(
+                "Walk-forward window generation requires training_settings.start_date and end_date. "
+                "Provide a config with explicit dates or set them before running."
+            )
         min_train_start = None
         if base_config.training_settings.start_date:
             try:
@@ -208,6 +223,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Print windows without training")
     parser.add_argument("--quiet", action="store_true", help="Reduce verbose logging output")
     parser.add_argument("--seed", type=int, help="Random seed for reproducible training runs")
+    parser.add_argument(
+        "--optuna-trials",
+        type=int,
+        help="Enable Optuna-lite search with the requested number of trials (e.g., 5)",
+    )
 
     parser.set_defaults(allow_partial_final=True)
     return parser

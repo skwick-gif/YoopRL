@@ -54,21 +54,57 @@ from training.rewards.dsr_wrapper import DSRConfig, DSRRewardWrapper
 class ContinuousActionAdapter(gym.ActionWrapper):
     """Map SAC's continuous actions back onto the env's discrete API."""
 
+    SELL_THRESHOLD = 0.33
+    BUY_THRESHOLD = 0.33
+    FLAT_BUY_THRESHOLD = 0.2
+    NEUTRAL_WINDOW = 0.3
+    NEUTRAL_BIAS = 0.2
+
     def __init__(self, env):
         super().__init__(env)
         self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        self._short_enabled = self._detect_short_support()
 
     def action(self, action):
         value = float(action[0]) if isinstance(action, (list, tuple, np.ndarray)) else float(action)
-        if value <= -0.33:
+        holdings = self._current_holdings() or 0.0
+
+        if value <= -self.SELL_THRESHOLD:
+            if not self._short_enabled and holdings <= 0.0:
+                return 0  # HOLD when flat and shorts disabled
             return 2  # SELL
-        if value >= 0.33:
+
+        buy_threshold = self.BUY_THRESHOLD
+        if not self._short_enabled and holdings <= 0.0:
+            if abs(value) <= self.NEUTRAL_WINDOW:
+                value += self.NEUTRAL_BIAS
+            buy_threshold = self.FLAT_BUY_THRESHOLD
+
+        if value >= buy_threshold:
             return 1  # BUY
         return 0  # HOLD
 
     def reverse_action(self, action):
         mapping = {0: 0.0, 1: 1.0, 2: -1.0}
         return np.array([mapping.get(int(action), 0.0)], dtype=np.float32)
+
+    def _unwrap_env(self):
+        env = self.env
+        depth = 0
+        while hasattr(env, 'env') and depth < 5:
+            if hasattr(env, 'holdings') or hasattr(env, 'supports_shorting'):
+                break
+            env = getattr(env, 'env')
+            depth += 1
+        return env
+
+    def _detect_short_support(self) -> bool:
+        env = self._unwrap_env()
+        return bool(getattr(env, 'supports_shorting', False))
+
+    def _current_holdings(self) -> float:
+        env = self._unwrap_env()
+        return float(getattr(env, 'holdings', 0.0))
 
 
 AGENT_ALIAS_MAP = {
@@ -125,6 +161,18 @@ def _seed_environment(env: Any, seed: int) -> None:
         observation_space.seed(seed)
 
 
+def _maybe_warm_start_agent(agent: Any, warm_start_path: Optional[str]) -> None:
+    if not warm_start_path:
+        return
+    try:
+        agent.load(warm_start_path)
+        print(f"[WARM START] Loaded weights from {warm_start_path}")
+    except FileNotFoundError:
+        print(f"[WARM START] Requested model not found at {warm_start_path}; continuing without warm start")
+    except Exception as exc:
+        print(f"[WARM START] Failed to load prior model ({warm_start_path}): {exc}")
+
+
 def _canonical_agent_type(agent_type: str) -> str:
     if not agent_type:
         return "PPO"
@@ -170,6 +218,29 @@ def _sanitize_train_split(value: Any, default: float = 0.8) -> float:
 
     # Avoid degenerate splits
     return float(max(0.05, min(split, 0.95)))
+
+
+def _sanitize_fraction(
+    value: Any,
+    *,
+    default: float = 0.0,
+    min_value: float = 0.01,
+    max_value: float = 0.5,
+) -> float:
+    if value in (None, "", "none", "None"):
+        return float(default)
+
+    try:
+        fraction = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+    if fraction <= 0.0:
+        return 0.0
+    if fraction >= 1.0:
+        return float(max_value)
+
+    return float(max(min_value, min(fraction, max_value)))
 
 
 def _is_intraday_mode(config_dict: Dict[str, Any]) -> bool:
@@ -327,6 +398,103 @@ def _select_feature_columns(
         selected = list(numeric_columns)
 
     return selected
+
+
+def _normalize_feature_frames(
+    train_numeric: pd.DataFrame,
+    test_numeric: pd.DataFrame,
+    *,
+    symbol: str,
+    agent_type: str,
+    method: str = 'zscore',
+    normalizer_dir: str | Path = 'backend/models',
+    apply_transform: bool = False,
+) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Fit a StateNormalizer, optionally applying it to the provided frames."""
+
+    if train_numeric.empty:
+        raise ValueError("Training feature frame is empty; cannot normalize")
+
+    normalizer = StateNormalizer(method=method)
+    normalizer.fit(train_numeric.values)
+
+    if apply_transform:
+        train_scaled = pd.DataFrame(
+            normalizer.transform(train_numeric.values),
+            columns=list(train_numeric.columns),
+            index=train_numeric.index,
+            dtype=np.float32,
+        )
+        test_scaled = pd.DataFrame(
+            normalizer.transform(test_numeric.values),
+            columns=list(test_numeric.columns),
+            index=test_numeric.index,
+            dtype=np.float32,
+        )
+    else:
+        train_scaled = train_numeric.copy()
+        test_scaled = test_numeric.copy()
+
+    normalizer_dir_path = Path(normalizer_dir)
+    normalizer_dir_path.mkdir(parents=True, exist_ok=True)
+    normalizer_path = normalizer_dir_path / f"normalizer_{symbol}_{agent_type}.json"
+    normalizer.save_params(str(normalizer_path))
+
+    return train_scaled, test_scaled, str(normalizer_path)
+
+
+def apply_saved_normalizer(
+    df: pd.DataFrame,
+    feature_columns: Sequence[str],
+    normalizer_path: Optional[str],
+) -> pd.DataFrame:
+    """Apply a persisted ``StateNormalizer`` to the requested columns.
+
+    Args:
+        df: DataFrame whose columns should be transformed in-place.
+        feature_columns: Ordered list of feature names used during training.
+        normalizer_path: Filesystem path to the saved normalizer JSON.
+
+    Returns:
+        The same DataFrame instance with normalized feature columns.
+    """
+
+    if not normalizer_path:
+        return df
+
+    normalizer_file = Path(normalizer_path)
+    if not normalizer_file.is_absolute():
+        normalizer_file = Path.cwd() / normalizer_file
+
+    if not normalizer_file.exists():
+        raise FileNotFoundError(f"Normalization parameters not found at {normalizer_file}")
+
+    ordered_columns = list(feature_columns or [])
+    if not ordered_columns:
+        return df
+
+    missing = [col for col in ordered_columns if col not in df.columns]
+    if missing:
+        raise ValueError(
+            "Missing feature columns for normalization: " + ", ".join(missing)
+        )
+
+    normalizer = StateNormalizer()
+    normalizer.load_params(str(normalizer_file))
+
+    values = df[ordered_columns].values
+    transformed = normalizer.transform(values).astype(np.float32)
+    df.loc[:, ordered_columns] = transformed
+    return df
+
+
+def _prepare_tensorboard_dir(agent_type: str) -> Path:
+    """Ensure the default TensorBoard directory exists for the agent."""
+
+    base_dir = Path("backend/models") / agent_type.lower()
+    tensorboard_dir = base_dir / "tensorboard"
+    tensorboard_dir.mkdir(parents=True, exist_ok=True)
+    return tensorboard_dir
 
 
 def _resolve_hyperparameters(config_dict: dict) -> dict:
@@ -664,16 +832,32 @@ def _load_intraday_training_frames(
 
     numeric_cols = [col for col in dataset.columns if is_numeric_dtype(dataset[col])]
     dataset[numeric_cols] = dataset[numeric_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    walk_forward_full = bool(training_settings.get('walk_forward_full_window'))
+    optuna_trials = int(training_settings.get('optuna_trials') or 0)
+    validation_fraction = _sanitize_fraction(
+        training_settings.get('optuna_validation_fraction', training_settings.get('internal_validation_fraction')),
+        default=0.1,
+    )
+    if optuna_trials <= 0:
+        validation_fraction = 0.0
 
-    split_ratio = _sanitize_train_split(train_split, default=0.8)
-    split_index = int(len(dataset) * split_ratio)
-    split_index = max(1, min(split_index, len(dataset) - 1))
+    if walk_forward_full:
+        train_df = dataset.copy()
+        if validation_fraction > 0.0 and len(dataset) > 1:
+            val_rows = max(1, int(len(dataset) * validation_fraction))
+            test_df = dataset.iloc[-val_rows:].copy()
+        else:
+            test_df = dataset.copy()
+    else:
+        split_ratio = _sanitize_train_split(train_split, default=0.8)
+        split_index = int(len(dataset) * split_ratio)
+        split_index = max(1, min(split_index, len(dataset) - 1))
 
-    train_df = dataset.iloc[:split_index].copy()
-    test_df = dataset.iloc[split_index:].copy()
+        train_df = dataset.iloc[:split_index].copy()
+        test_df = dataset.iloc[split_index:].copy()
 
-    if test_df.empty:
-        test_df = dataset.iloc[-max(1, len(dataset) // 5):].copy()
+        if test_df.empty:
+            test_df = dataset.iloc[-max(1, len(dataset) // 5):].copy()
 
     return train_df, test_df, benchmark_symbol
 
@@ -683,46 +867,34 @@ def optimize_hyperparameters_with_optuna(
     train_data: pd.DataFrame,
     test_data: pd.DataFrame,
     feature_names: list,
-    n_trials: int = 100
-) -> dict:
-    """
-    Use Optuna to find optimal hyperparameters.
-    
-    Args:
-        config_dict: Base configuration dictionary
-        train_data: Training DataFrame
-        test_data: Test DataFrame  
-        feature_names: List of feature column names
-        n_trials: Number of Optuna trials to run
-    
-    Returns:
-        Dictionary with optimized hyperparameters
-    """
-    
+    n_trials: int = 100,
+    intraday_params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run Optuna with constrained search space and persist study metadata."""
+
     print(f"\n{'='*70}")
-    print(f"[OPTUNA] Starting Hyperparameter Optimization")
+    print("[OPTUNA] Starting Hyperparameter Optimization")
     print(f"   Trials: {n_trials}")
     print(f"   Agent: {config_dict['agent_type']}")
     print(f"{'='*70}\n")
-    
-    # Suppress Optuna verbose logging
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    
+
     agent_type = config_dict['agent_type'].upper()
     intraday_mode = _is_intraday_mode(config_dict)
-    if intraday_mode:
-        raise ValueError("Optuna optimization is not supported for intraday pipelines.")
+    canonical_agent = _canonical_agent_type(agent_type)
+    symbol = str(config_dict.get('symbol', 'UNKNOWN')).upper()
+    intraday_params = dict(intraday_params or {})
 
-    base_hyperparams = _resolve_hyperparameters(config_dict)
-    if base_hyperparams is None:
-        base_hyperparams = {}
-    initial_capital = config_dict['training_settings'].get('initial_capital')
-    if initial_capital is None:
-        initial_capital = config_dict['training_settings'].get('initial_cash', 100000)
+    base_hyperparams = _resolve_hyperparameters(config_dict) or {}
     training_settings = config_dict['training_settings']
-    commission_config = resolve_commission_config(training_settings)
-    max_position_size = float(training_settings.get('max_position_size', 1.0))
-    normalize_obs = bool(training_settings.get('normalize_obs', True))
+    initial_capital = training_settings.get('initial_capital') or training_settings.get('initial_cash', 100000)
+    commission_config = intraday_params.get('commission_config') or resolve_commission_config(training_settings)
+    max_position_size = float(intraday_params.get('max_position_size', training_settings.get('max_position_size', 1.0)))
+    slippage_config = intraday_params.get('slippage_config') or resolve_slippage_config(training_settings)
+    forced_exit_minutes = intraday_params.get('forced_exit_minutes', training_settings.get('forced_exit_minutes', 375.0))
+    forced_exit_tolerance = intraday_params.get('forced_exit_tolerance', training_settings.get('forced_exit_tolerance', 1.0))
+    forced_exit_column = intraday_params.get('forced_exit_column', training_settings.get('forced_exit_column'))
     reward_mode = str(training_settings.get('reward_mode', '')).lower()
     dsr_config_obj: Optional[DSRConfig] = None
     if reward_mode == 'dsr':
@@ -737,15 +909,40 @@ def optimize_hyperparameters_with_optuna(
                 clip_value=clip_value,
             )
             dsr_config_obj.validate()
-        except Exception as exc:  # pragma: no cover - config validation
+        except Exception as exc:
             raise ValueError(f"Invalid DSR configuration for Optuna: {exc}")
     history_config = _extract_history_config(config_dict.get('features', {}))
-    
-    def objective(trial):
-        """Optuna objective function - maximize Sharpe ratio on validation set."""
-        
-        # Sample hyperparameters based on agent type
-        if agent_type == 'PPO':
+
+    def _build_intraday_env(df: pd.DataFrame, *, sampler: IntradaySessionSampler) -> gym.Env:
+        base_env = IntradayEquityEnv(
+            df=df,
+            initial_capital=initial_capital,
+            commission=commission_config,
+            max_position_size=max_position_size,
+            normalize_obs=False,
+            history_config=history_config,
+            sampler=sampler,
+            slippage_config=slippage_config,
+            forced_exit_minutes=forced_exit_minutes,
+            forced_exit_tolerance=forced_exit_tolerance,
+            forced_exit_column=forced_exit_column,
+        )
+        wrapped: Any = base_env
+        if reward_mode == 'dsr' and dsr_config_obj is not None:
+            wrapped = DSRRewardWrapper(base_env, config=dsr_config_obj)
+        return ContinuousActionAdapter(wrapped)
+
+    def objective(trial: optuna.Trial) -> float:
+        if intraday_mode:
+            trial_hyperparams = {
+                'learning_rate': trial.suggest_float('learning_rate', 5e-5, 5e-4, log=True),
+                'gamma': trial.suggest_float('gamma', 0.97, 0.995),
+                'batch_size': trial.suggest_categorical('batch_size', [128, 256, 512]),
+                'tau': trial.suggest_float('tau', 0.005, 0.02),
+                'ent_coef': trial.suggest_categorical('ent_coef', ['auto', 0.1, 0.2]),
+                'episodes': base_hyperparams.get('episodes', 5000),
+            }
+        elif agent_type == 'PPO':
             trial_hyperparams = {
                 'learning_rate': trial.suggest_float('learning_rate', 5e-5, 5e-4, log=True),
                 'gamma': trial.suggest_float('gamma', 0.98, 0.999),
@@ -753,90 +950,88 @@ def optimize_hyperparameters_with_optuna(
                 'n_steps': trial.suggest_categorical('n_steps', [1024, 2048, 4096]),
                 'ent_coef': trial.suggest_float('ent_coef', 0.0, 0.02),
                 'clip_range': trial.suggest_float('clip_range', 0.1, 0.25),
-                'episodes': base_hyperparams.get('episodes', 10000)  # Keep episodes fixed
+                'episodes': base_hyperparams.get('episodes', 10000),
             }
-        else:  # SAC
+        else:
             trial_hyperparams = {
                 'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-3, log=True),
                 'gamma': trial.suggest_float('gamma', 0.95, 0.999),
                 'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512]),
                 'tau': trial.suggest_float('tau', 0.001, 0.02),
                 'ent_coef': trial.suggest_categorical('ent_coef', ['auto', 0.1, 0.2, 0.5]),
-                'episodes': base_hyperparams.get('episodes', 10000)
+                'episodes': base_hyperparams.get('episodes', 10000),
             }
-        
+
         try:
-            # Create environment for this trial
-            if agent_type == 'PPO':
+            if intraday_mode:
+                env = _build_intraday_env(train_data, sampler=IntradaySessionSampler(shuffle=True))
+            elif agent_type == 'PPO':
                 env = StockTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
                     commission=commission_config,
-                    history_config=history_config
+                    history_config=history_config,
                 )
             else:
                 env = ETFTradingEnv(
                     df=train_data,
                     initial_capital=initial_capital,
                     commission=commission_config,
-                    history_config=history_config
+                    history_config=history_config,
                 )
                 env = ContinuousActionAdapter(env)
-            
-            # Create agent with trial hyperparameters
+
             agent = create_agent(
-                agent_type=agent_type,
+                agent_type=canonical_agent,
                 env=env,
                 hyperparameters=trial_hyperparams,
-                model_dir=f"backend/models/{agent_type.lower()}/optuna_trials"
+                model_dir=f"backend/models/{agent_type.lower()}/optuna_trials",
             )
-            
-            # Quick training (reduced timesteps for optimization)
-            quick_timesteps = min(10000, len(train_data) * 50)  # 50 episodes max
+
+            steps_per_episode = max(1, len(train_data))
+            quick_timesteps = min(25000, steps_per_episode * 20)
+            quick_timesteps = max(steps_per_episode, quick_timesteps)
             agent.train(total_timesteps=quick_timesteps, callback=None)
-            
-            # Evaluate on validation set (test_data)
-            # Create test environment
-            if agent_type == 'PPO':
+
+            if intraday_mode:
+                test_env = _build_intraday_env(test_data, sampler=IntradaySessionSampler(shuffle=False, sequential=True))
+            elif agent_type == 'PPO':
                 test_env = StockTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
                     commission=commission_config,
-                    history_config=history_config
+                    history_config=history_config,
                 )
             else:
                 test_env = ETFTradingEnv(
                     df=test_data,
                     initial_capital=initial_capital,
                     commission=commission_config,
-                    history_config=history_config
+                    history_config=history_config,
                 )
                 test_env = ContinuousActionAdapter(test_env)
-            
-            returns = []
-            trade_counts = []
-            drawdowns = []
-            for episode in range(10):  # 10 evaluation episodes
-                obs, _ = test_env.reset()
 
+            returns: List[float] = []
+            trade_counts: List[int] = []
+            drawdowns: List[float] = []
+            eval_episodes = 5 if intraday_mode else 10
+            for _ in range(eval_episodes):
+                obs, _ = test_env.reset()
                 terminated = False
                 truncated = False
                 episode_trades = 0
                 peak_value = float(initial_capital)
                 episode_max_drawdown = 0.0
                 total_value = float(initial_capital)
-                
+
                 while not (terminated or truncated):
                     prediction = agent.predict(obs, deterministic=True)
                     action = prediction[0] if isinstance(prediction, tuple) else prediction
                     obs, reward, terminated, truncated, info = test_env.step(action)
-                    
                     if action in (1, 2):
                         episode_trades += 1
 
-                    info_total = None
-                    if isinstance(info, dict):
-                        info_total = info.get('total_value')
+                    info_total = info.get('total_value') if isinstance(info, dict) else None
                     if info_total is None:
                         info_total = getattr(test_env, 'total_value', peak_value)
                     total_value = float(info_total)
@@ -845,66 +1040,93 @@ def optimize_hyperparameters_with_optuna(
                         peak_value = total_value
                     else:
                         drawdown = (peak_value - total_value) / (peak_value + 1e-8)
-                        if drawdown > episode_max_drawdown:
-                            episode_max_drawdown = drawdown
-                
+                        episode_max_drawdown = max(episode_max_drawdown, drawdown)
+
                 final_value = total_value
                 episode_return = (final_value - float(initial_capital)) / float(initial_capital)
                 returns.append(episode_return)
                 trade_counts.append(episode_trades)
                 drawdowns.append(episode_max_drawdown)
-            
-            # Calculate Sharpe ratio (mean return / std return)
+
             mean_return = np.mean(returns)
             std_return = np.std(returns)
             sharpe_ratio = mean_return / (std_return + 1e-8)
 
             avg_trades = float(np.mean(trade_counts)) if trade_counts else 0.0
-            if avg_trades < 1.0:
-                sharpe_ratio = -1e6  # Strongly penalize policies that never trade
+            min_trades = 3.0 if intraday_mode else 1.0
+            if avg_trades < min_trades:
+                sharpe_ratio = -1e6
 
             avg_drawdown = float(np.mean(drawdowns)) if drawdowns else 0.0
-            if avg_drawdown > 0.25:  # penalize >25% drawdown
+            if avg_drawdown > 0.25:
                 sharpe_ratio -= (avg_drawdown - 0.25) * 200.0
-            
-            print(f"   Trial {trial.number}: Sharpe={sharpe_ratio:.3f}, "
-                  f"LR={trial_hyperparams['learning_rate']:.6f}, "
-                  f"Gamma={trial_hyperparams['gamma']:.3f}, "
-                  f"AvgTrades={avg_trades:.2f}, "
-                  f"AvgDD={avg_drawdown*100:.2f}%")
-            
-            return sharpe_ratio
-            
-        except Exception as e:
-            print(f"   Trial {trial.number} failed: {e}")
-            return -999.0  # Very bad score for failed trials
-    
-    # Create Optuna study
+
+            print(
+                f"   Trial {trial.number}: Sharpe={sharpe_ratio:.3f}, "
+                f"LR={trial_hyperparams['learning_rate']:.6f}, "
+                f"Gamma={trial_hyperparams.get('gamma', 0):.3f}, "
+                f"AvgTrades={avg_trades:.2f}, AvgDD={avg_drawdown*100:.2f}%"
+            )
+
+            return float(sharpe_ratio)
+
+        except Exception as exc:  # pragma: no cover - defensive scoring
+            print(f"   Trial {trial.number} failed: {exc}")
+            return -999.0
+
     study = optuna.create_study(
         direction='maximize',
         sampler=TPESampler(seed=42),
-        pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=3)
+        pruner=MedianPruner(n_startup_trials=5, n_warmup_steps=3),
     )
-    
-    # Run optimization
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
-    
-    # Get best hyperparameters
+
     best_params = study.best_params
     best_value = study.best_value
-    
+
     print(f"\n{'='*70}")
-    print(f"[OK] Optuna Optimization Complete!")
+    print("[OK] Optuna Optimization Complete!")
     print(f"   Best Sharpe Ratio: {best_value:.3f}")
-    print(f"   Best Hyperparameters:")
+    print("   Best Hyperparameters:")
     for key, value in best_params.items():
         print(f"      {key}: {value}")
     print(f"{'='*70}\n")
-    
-    # Merge best params with original config
+
     optimized_hyperparams = {**base_hyperparams, **best_params}
-    
-    return optimized_hyperparams
+
+    summary_dir = Path('backend/models') / canonical_agent.lower() / 'optuna_trials'
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    summary_path = summary_dir / f"optuna_{symbol}_{timestamp}.json"
+    trial_records = [
+        {
+            'number': trial.number,
+            'value': trial.value,
+            'state': str(trial.state),
+            'params': trial.params,
+        }
+        for trial in study.trials
+    ]
+    summary_payload = {
+        'symbol': symbol,
+        'agent_type': agent_type,
+        'n_trials': len(study.trials),
+        'best_value': float(best_value),
+        'best_params': best_params,
+        'best_trial': study.best_trial.number,
+        'created_at': datetime.utcnow().isoformat() + 'Z',
+        'trials': trial_records,
+    }
+    summary_path.write_text(json.dumps(summary_payload, indent=2), encoding='utf-8')
+
+    return {
+        'hyperparameters': optimized_hyperparams,
+        'best_value': float(best_value),
+        'best_params': best_params,
+        'best_trial': study.best_trial.number,
+        'n_trials': len(study.trials),
+        'study_path': str(summary_path),
+    }
 
 
 def train_agent(config) -> dict:
@@ -1042,11 +1264,12 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     print("\n[INFO] Normalizing features...")
     print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
 
-    normalizer = StateNormalizer(method='zscore')
-    normalizer.fit(train_numeric.values)
-
-    normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
-    normalizer.save_params(normalizer_path)
+    train_numeric, test_numeric, normalizer_path = _normalize_feature_frames(
+        train_numeric=train_numeric,
+        test_numeric=test_numeric,
+        symbol=symbol,
+        agent_type=requested_agent_type,
+    )
     print(f"[OK] Normalization complete, saved to {normalizer_path}")
 
     print("\n[INFO] Creating trading environment...")
@@ -1098,7 +1321,11 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     if random_seed is not None:
         _seed_environment(env, random_seed)
 
+    tensorboard_dir = _prepare_tensorboard_dir(canonical_agent_type)
+    print(f"   TensorBoard logs → {tensorboard_dir}")
+
     print("\n[INFO] Creating RL agent...")
+    optuna_metadata: Optional[Dict[str, Any]] = None
     agent = create_agent(
         agent_type=canonical_agent_type,
         env=env,
@@ -1111,15 +1338,15 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
     optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
     if optuna_trials > 0:
         print(f"\n[OPTUNA] Running optimization with {optuna_trials} trials...")
-        optimized_hyperparams = optimize_hyperparameters_with_optuna(
+        optuna_result = optimize_hyperparameters_with_optuna(
             config_dict=config_dict,
             train_data=train_df,
             test_data=test_df,
             feature_names=numeric_feature_columns,
             n_trials=optuna_trials
         )
-
-        hyperparams = optimized_hyperparams
+        hyperparams = optuna_result['hyperparameters']
+        optuna_metadata = {k: v for k, v in optuna_result.items() if k != 'hyperparameters'}
 
         print("\n[INFO] Recreating agent with optimized hyperparameters...")
         agent = create_agent(
@@ -1130,6 +1357,10 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
             seed=random_seed,
         )
         print("[OK] Agent recreated with optimized parameters")
+
+    warm_start_path = training_settings.get('warm_start_model_path')
+    if warm_start_path:
+        _maybe_warm_start_agent(agent, warm_start_path)
 
     print("\n[TRAIN] Training agent...")
 
@@ -1316,6 +1547,7 @@ def _train_daily_agent(ctx: Dict[str, Any]) -> dict:
         'final_balance': float(test_metrics['final_balance']),
         'equity_curve': eval_results.get('equity_curve', []),
         'trade_history': eval_results.get('trades', []),
+        'optuna': optuna_metadata,
     }
 
     model_id = model_manager.save_model(
@@ -1397,6 +1629,8 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         raise ValueError(f"Invalid DSR configuration: {exc}") from exc
 
     train_market, test_market, benchmark_symbol = _load_intraday_training_frames(config_dict, train_split)
+    if training_settings.get('walk_forward_full_window'):
+        print("[INFO] Using full-window intraday training span (walk-forward mode)")
     training_settings.setdefault('benchmark_symbol', benchmark_symbol)
 
     interval = training_settings['interval']
@@ -1469,11 +1703,12 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     print("\n[INFO] Normalizing features...")
     print(f"   Selected features ({len(numeric_feature_columns)}): {feature_display}")
 
-    normalizer = StateNormalizer(method='zscore')
-    normalizer.fit(train_numeric.values)
-
-    normalizer_path = f"backend/models/normalizer_{symbol}_{requested_agent_type}.json"
-    normalizer.save_params(normalizer_path)
+    train_numeric, test_numeric, normalizer_path = _normalize_feature_frames(
+        train_numeric=train_numeric,
+        test_numeric=test_numeric,
+        symbol=symbol,
+        agent_type=requested_agent_type,
+    )
     print(f"[OK] Normalization complete, saved to {normalizer_path}")
 
     print("\n[INFO] Creating trading environment...")
@@ -1514,6 +1749,35 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     if random_seed is not None:
         _seed_environment(env, random_seed)
 
+    tensorboard_dir = _prepare_tensorboard_dir(canonical_agent_type)
+    print(f"   TensorBoard logs → {tensorboard_dir}")
+
+    optuna_metadata: Optional[Dict[str, Any]] = None
+    optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
+    training_settings['optuna_trials'] = optuna_trials
+    if optuna_trials > 0:
+        if len(test_df) < 1:
+            raise ValueError("Optuna trials requested but validation set is empty; increase optuna_validation_fraction.")
+        print(f"\n[OPTUNA] Running intraday optimization with {optuna_trials} constrained trial(s)...")
+        optuna_result = optimize_hyperparameters_with_optuna(
+            config_dict=config_dict,
+            train_data=train_df,
+            test_data=test_df,
+            feature_names=numeric_feature_columns,
+            n_trials=optuna_trials,
+            intraday_params={
+                'commission_config': commission_config,
+                'slippage_config': slippage_config,
+                'max_position_size': max_position_size,
+                'forced_exit_minutes': forced_exit_minutes,
+                'forced_exit_tolerance': forced_exit_tolerance,
+                'forced_exit_column': forced_exit_column,
+            },
+        )
+        hyperparams = optuna_result['hyperparameters']
+        optuna_metadata = {k: v for k, v in optuna_result.items() if k != 'hyperparameters'}
+        print(f"[OPTUNA] Study artifact saved to {optuna_metadata['study_path']}")
+
     print("\n[INFO] Creating RL agent...")
     agent = create_agent(
         agent_type=canonical_agent_type,
@@ -1524,11 +1788,9 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
     )
     print(f"[OK] {canonical_agent_type} agent created")
 
-    optuna_trials = int(training_settings.get('optuna_trials', 0) or 0)
-    if optuna_trials > 0:
-        print("[WARN] Optuna optimization is disabled for the intraday pipeline; forcing 0 trials.")
-        optuna_trials = 0
-    training_settings['optuna_trials'] = optuna_trials
+    warm_start_path = training_settings.get('warm_start_model_path')
+    if warm_start_path:
+        _maybe_warm_start_agent(agent, warm_start_path)
 
     print("\n[TRAIN] Training agent...")
 
@@ -1706,6 +1968,7 @@ def _train_intraday_agent(ctx: Dict[str, Any]) -> dict:
         'final_balance': float(test_metrics['final_balance']),
         'equity_curve': eval_results.get('equity_curve', []),
         'trade_history': eval_results.get('trades', []),
+        'optuna': optuna_metadata,
     }
 
     model_id = model_manager.save_model(

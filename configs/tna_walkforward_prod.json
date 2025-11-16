@@ -1,0 +1,66 @@
+{
+  "agent_type": "SAC_INTRADAY_DSR",
+  "symbol": "TNA",
+  "training_settings": {
+    "start_date": "2018-01-02",
+    "end_date": "2025-11-10",
+    "total_timesteps": 500000,
+    "max_total_timesteps": 350000,
+    "episode_budget": 40,
+    "intraday_enabled": true,
+    "data_frequency": "intraday",
+    "interval": "15m",
+    "benchmark_symbol": "IWM",
+    "benchmark_interval": "15m",
+    "reward_mode": "dsr",
+    "optuna_trials": 8,
+    "optuna_validation_fraction": 0.1,
+    "train_split": 0.9,
+    "initial_capital": 100000,
+    "max_position_size": 1.0,
+    "forced_exit_minutes": 375.0,
+    "forced_exit_tolerance": 1.0,
+    "forced_exit_column": null,
+    "random_seed": 1337,
+    "walk_forward_gates": {
+      "min_trades": 25,
+      "min_sharpe": 0.4,
+      "max_drawdown": 18.0
+    },
+    "walk_forward_gate_grace_windows": 2,
+    "walk_forward_stop_on_fail": false,
+    "walk_forward_warm_start": true,
+    "commission": {
+      "type": "ibkr_tiered_us_equities",
+      "per_share": 0.0035,
+      "min_fee": 2.5,
+      "max_pct": 0.01
+    },
+    "slippage": {
+      "buy_bps": 10,
+      "sell_bps": 10,
+      "buy_per_share": 0.0,
+      "sell_per_share": 0.0
+    },
+    "dsr_config": {
+      "decay": 0.94,
+      "epsilon": 1e-09,
+      "warmup_steps": 200,
+      "clip_value": 6.0,
+      "entry_bonus": 0.05,
+      "entry_min_position": 0.0
+    }
+  },
+  "sac_hyperparameters": {
+    "learning_rate": 5e-05,
+    "buffer_size": 300000,
+    "batch_size": 256,
+    "tau": 0.005,
+    "gamma": 0.995,
+    "ent_coef": "auto",
+    "target_entropy": -1.0,
+    "vol_penalty": 0.0,
+    "episodes": 80000,
+    "learning_starts": 5000
+  }
+}

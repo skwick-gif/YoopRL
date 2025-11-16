@@ -37,6 +37,10 @@ from typing import Dict, Any, Optional
 from agents.base_agent import BaseAgent
 from agents.ppo_agent import PPOAgent
 from agents.sac_agent import SACAgent
+from utils.torch_numpy_patch import ensure_torch_numpy_compat
+
+# Ensure PyTorch can safely consume NumPy arrays (NumPy 2.x workaround)
+ensure_torch_numpy_compat()
 
 
 class AgentFactory:
